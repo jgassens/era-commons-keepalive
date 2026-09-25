@@ -252,7 +252,7 @@ test("logout record and notification both happen only on logged-in -> logged-out
   assert.equal(fromLoggedIn.store.sessionStatus, "logged-out");
   assert.equal(fromLoggedIn.store.logoutRecords.length, 1);
   assert.equal(fromLoggedIn.calls.notifications.length, 1);
-  assert.equal(fromLoggedIn.store.logoutRecords[0].reason, "login or logout page");
+  assert.equal(fromLoggedIn.store.logoutRecords[0].reason, "login or logout page (eRA timer cookie deleted)");
 
   var fromUnknown = makeFake({ storage: { sessionStatus: "unknown" }, tabs: [eraTab(1, LOGIN)] });
   await fromUnknown.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
@@ -290,7 +290,7 @@ test("a deleted cookie after logged-in means logged-out", async function () {
   assert.ok(logLines(fake).some(function (line) { return line.endsWith("cookie deleted, server not called (ping off)"); }));
 });
 
-test("no eRA tabs but a live cookie keeps logged-in and stops the alarm", async function () {
+test("no eRA tabs but a live cookie goes idle, stops the alarm and does not notify", async function () {
   var logoutAt = Date.now() + 30 * MINUTE;
   var fake = makeFake({
     storage: { sessionStatus: "logged-in", sessionStartedAt: 5 },
@@ -299,14 +299,17 @@ test("no eRA tabs but a live cookie keeps logged-in and stops the alarm", async 
   });
   fake.alarms["era-keep-alive"] = { name: "era-keep-alive", periodInMinutes: 4 };
   await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
-  assert.equal(fake.store.sessionStatus, "logged-in");
+  assert.equal(fake.store.sessionStatus, "idle");
   assert.equal(fake.store.sessionStartedAt, 5);
+  assert.equal(typeof fake.store.idleSince, "number");
   assert.equal(fake.store.eraLogoutAt, logoutAt);
   assert.equal(fake.alarms["era-keep-alive"], undefined);
   assert.equal(fake.calls.notifications.length, 0);
+  assert.equal((fake.store.logoutRecords || []).length, 0);
   assert.equal(fake.calls.sent.length, 0);
+  assert.equal(fake.calls.badgeText[fake.calls.badgeText.length - 1], "…");
   assert.ok(logLines(fake).some(function (line) {
-    return /no eRA tabs open, cookie 30\.0 min; still logged in, nothing to nudge \(4-minute timer stopped\)$/.test(line);
+    return /no eRA tabs open, cookie 30\.0 min; not keeping the session alive until an eRA tab is open \(4-minute timer stopped\)$/.test(line);
   }), logLines(fake).join("\n"));
 });
 
@@ -604,15 +607,121 @@ test("a tick with only unreachable tabs keeps logged-in, and a later real logout
   assert.equal(fake.calls.notifications.length, 1);
 });
 
-test("an unreachable tab sitting on eRA's logout URL counts as a logout", async function () {
+test("an unreachable tab sitting on eRA's logout URL counts as a logout once the cookie is gone", async function () {
   var fake = makeFake({
     storage: { sessionStatus: "logged-in" },
-    cookie: Date.now() + 30 * MINUTE,
     tabs: [eraTab(1, "https://public.era.nih.gov/commons/authi/public/do?action=logout", { unreachable: true })]
   });
   await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
   assert.equal(fake.store.sessionStatus, "logged-out");
-  assert.equal(fake.store.logoutRecords[0].reason, "login or logout page");
+  assert.equal(fake.store.logoutRecords[0].reason, "login or logout page (eRA timer cookie deleted)");
+});
+
+test("a login tab with a live cookie stays logged-in and keeps nudging", async function () {
+  var fake = makeFake({
+    storage: { sessionStatus: "logged-in", sessionStartedAt: 9 },
+    cookie: Date.now() + 30 * MINUTE,
+    tabs: [eraTab(1, LOGIN), eraTab(2, "https://public.era.nih.gov/commons/authi/public/do?action=logout", { unreachable: true })]
+  });
+  fake.alarms["era-keep-alive"] = { name: "era-keep-alive", periodInMinutes: 4 };
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  await fake.bg.handleMessage(pageReady({ path: "/commonsplus/public/login.era", isLoginPage: true, managerPresent: false, minsLeft: null }), { tab: { id: 1 } });
+  await fake.drain();
+  assert.equal(fake.store.sessionStatus, "logged-in");
+  assert.equal(fake.store.sessionStartedAt, 9);
+  assert.equal((fake.store.logoutRecords || []).length, 0);
+  assert.equal(fake.calls.notifications.length, 0);
+  assert.ok(fake.alarms["era-keep-alive"]);
+});
+
+test("returning after idle with a past cookie value records the end quietly, with an estimate", async function () {
+  var lastDeadline = Date.now() - 3 * 60 * MINUTE;
+  var fake = makeFake({
+    storage: { sessionStatus: "idle", sessionStartedAt: Date.now() - 5 * 60 * MINUTE, idleSince: lastDeadline - 40 * MINUTE, eraLogoutAt: lastDeadline },
+    cookie: lastDeadline,
+    tabs: [eraTab(1, LOGIN)]
+  });
+  await fake.bg.handleMessage(pageReady({ path: "/commonsplus/public/login.era", isLoginPage: true, managerPresent: false, minsLeft: null }), { tab: { id: 1 } });
+  await fake.drain();
+  assert.equal(fake.store.sessionStatus, "logged-out");
+  assert.equal(fake.store.idleSince, null);
+  assert.equal(fake.store.logoutRecords.length, 1);
+  var record = fake.store.logoutRecords[0];
+  assert.equal(record.reason, "ended while no eRA tab was open");
+  assert.equal(record.estimatedEndAt, lastDeadline);
+  assert.ok(record.loggedOutDetectedAt > lastDeadline);
+  assert.equal(fake.calls.notifications.length, 0);
+  assert.doesNotMatch(matcher.logoutNote(record) || "", /hard limit/);
+});
+
+test("an idle session whose cookie is deleted, or an alarm with no cookie, ends without a notification", async function () {
+  var deadline = Date.now() + 20 * MINUTE;
+  var deleted = makeFake({ storage: { sessionStatus: "idle", idleSince: Date.now(), eraLogoutAt: deadline }, cookie: deadline, tabs: [] });
+  await deleted.deleteEraCookie("explicit");
+  await deleted.drain();
+  assert.equal(deleted.store.sessionStatus, "logged-out");
+  assert.equal(deleted.store.logoutRecords[0].reason, "ended while no eRA tab was open");
+  assert.ok(deleted.store.logoutRecords[0].estimatedEndAt <= Date.now());
+  assert.equal(deleted.calls.notifications.length, 0);
+
+  var ticked = makeFake({ storage: { sessionStatus: "idle", idleSince: Date.now(), eraLogoutAt: Date.now() - MINUTE }, tabs: [] });
+  await ticked.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  assert.equal(ticked.store.sessionStatus, "logged-out");
+  assert.equal(ticked.store.logoutRecords.length, 1);
+  assert.equal(ticked.calls.notifications.length, 0);
+});
+
+test("returning after idle with a live cookie is logged-in again, with no record and the same sign-in time", async function () {
+  var fake = makeFake({
+    storage: { sessionStatus: "idle", sessionStartedAt: 5, idleSince: Date.now() - 10 * MINUTE, eraLogoutAt: Date.now() + 20 * MINUTE },
+    cookie: Date.now() + 20 * MINUTE,
+    tabs: [eraTab(1, HOME, liveManager())]
+  });
+  await fake.bg.handleMessage(pageReady(), { tab: { id: 1 } });
+  await fake.drain();
+  assert.equal(fake.store.sessionStatus, "logged-in");
+  assert.equal(fake.store.sessionStartedAt, 5);
+  assert.equal(fake.store.idleSince, null);
+  assert.equal((fake.store.logoutRecords || []).length, 0);
+  assert.equal(fake.calls.notifications.length, 0);
+  assert.equal(fake.calls.badgeText[fake.calls.badgeText.length - 1], "ON");
+  assert.ok(fake.alarms["era-keep-alive"]);
+});
+
+test("a live cookie event while idle with no tab open stays idle", async function () {
+  var fake = makeFake({ storage: { sessionStatus: "idle", idleSince: Date.now(), eraLogoutAt: Date.now() + 5 * MINUTE }, cookie: Date.now() + 5 * MINUTE, tabs: [] });
+  await fake.setEraCookie(Date.now() + 30 * MINUTE);
+  await fake.drain();
+  assert.equal(fake.store.sessionStatus, "idle");
+  assert.equal(fake.calls.notifications.length, 0);
+});
+
+test("after a browser restart with no cookie, a live or idle session is recorded as ended at the stored logout time", async function () {
+  for (var prior of ["idle", "logged-in"]) {
+    var deadline = Date.now() - 30 * MINUTE;
+    var fake = makeFake({ storage: { sessionStatus: prior, sessionStartedAt: Date.now() - 2 * 60 * MINUTE, eraLogoutAt: deadline }, tabs: [] });
+    fake.chrome.runtime.onStartup.listeners.forEach(function (fn) { fn(); });
+    await settle();
+    await fake.drain();
+    assert.equal(fake.store.sessionStatus, "logged-out", prior);
+    assert.equal(fake.store.logoutRecords.length, 1);
+    assert.equal(fake.store.logoutRecords[0].estimatedEndAt, deadline);
+    assert.equal(fake.store.logoutRecords[0].reason, "ended while no eRA tab was open");
+    assert.equal(fake.calls.notifications.length, 0, prior);
+  }
+});
+
+test("minutesLeftAtLastNudge is the timer at the nudge, not a later cookie write", async function () {
+  var fake = makeFake({ storage: { sessionStatus: "logged-in" }, tabs: [eraTab(1, HOME, liveManager())] });
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  await fake.drain();
+  // eRA pushes its cookie well ahead after user activity; that moves eraLogoutAt only.
+  await fake.setEraCookie(Date.now() + 90 * MINUTE);
+  await fake.drain();
+  assert.ok(fake.store.eraLogoutAt > fake.store.lastNudgeTimerAt);
+  await fake.deleteEraCookie("expired_overwrite");
+  await fake.drain();
+  assert.equal(fake.store.logoutRecords[0].minutesLeftAtLastNudge, 45);
 });
 
 test("a tab whose content script is switched off is neither nudged, pinged nor counted", async function () {

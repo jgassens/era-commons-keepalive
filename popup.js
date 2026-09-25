@@ -34,7 +34,11 @@ function renderLogoutRecords(records) {
     var server = record.lastServerPing ||
       (typeof record.lastServerPingStatus === "number" ? "server " + record.lastServerPingStatus : null) ||
       (record.pingServer ? "no server ping recorded" : "server not called (ping off)");
-    item.textContent = "Logged out " + matcher.formatTime(record.loggedOutDetectedAt) +
+    var when = typeof record.estimatedEndAt === "number" ?
+      "probably ended around " + matcher.formatTime(record.estimatedEndAt) + ", noticed " +
+        matcher.formatTime(record.loggedOutDetectedAt) :
+      matcher.formatTime(record.loggedOutDetectedAt);
+    item.textContent = "Logged out " + when +
       (record.reason ? " (" + record.reason + ")" : "") + " — " +
       minutesText(record.minutesSinceSignIn, "unknown time") + " after sign-in, " +
       minutesText(record.minutesSinceLastNudge, "no activity nudge recorded") +
@@ -73,9 +77,11 @@ function render(state) {
   pingServer.checked = state.pingServer;
   document.getElementById("status").textContent = !state.enabled ? "Disabled" :
     state.sessionStatus === "logged-in" ? "Enabled — logged in" :
-    state.sessionStatus === "logged-out" ? "Enabled — logged out" : "Enabled — status unknown";
+    state.sessionStatus === "logged-out" ? "Enabled — logged out" :
+    state.sessionStatus === "idle" ? "No eRA tab open — not keeping the session alive" : "Enabled — status unknown";
   document.getElementById("signed-in").textContent =
-    state.sessionStatus === "logged-in" ? matcher.formatTime(state.sessionStartedAt) : "Not signed in";
+    state.sessionStatus === "logged-in" || state.sessionStatus === "idle" ?
+      matcher.formatTime(state.sessionStartedAt) : "Not signed in";
   document.getElementById("last-nudge").textContent = matcher.formatTime(state.lastNudgeAt);
   document.getElementById("logout-at").textContent = matcher.formatTime(state.eraLogoutAt);
   document.getElementById("last-click").textContent = matcher.formatTime(state.lastAutoClick);

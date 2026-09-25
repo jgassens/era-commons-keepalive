@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "eRA Commons Keep Alive",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Keeps your own eRA Commons session active while enabled.",
   "permissions": ["storage", "alarms", "notifications", "scripting", "cookies"],
   "host_permissions": ["https://*.era.nih.gov/*"],

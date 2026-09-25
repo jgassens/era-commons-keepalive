@@ -299,8 +299,11 @@ test("decides the session from tabs and the cookie, preferring positive evidence
   var live = { state: "live" };
   var missing = { state: "missing" };
   assert.deepEqual(matcher.decideSession([active, login], "logged-in", missing), { status: "logged-in", reason: "live eRA timer", path: "/a" });
-  // A login page ends the session even while the cookie is still live.
-  assert.equal(matcher.decideSession([login], "logged-in", live).status, "logged-out");
+  // A live cookie outranks a login page; without one the login page ends it.
+  assert.equal(matcher.decideSession([login], "logged-in", live).status, "logged-in");
+  assert.deepEqual(matcher.decideSession([login], "logged-in", missing),
+    { status: "logged-out", reason: "login or logout page (eRA timer cookie deleted)", path: "/login" });
+  assert.equal(matcher.decideSession([login], "logged-in", null).reason, "login or logout page");
   // A tab that saw no cookie is overruled by a live cookie read from Chrome.
   assert.equal(matcher.decideSession([noCookieTab], "logged-in", live).status, "logged-in");
   assert.equal(matcher.decideSession([noCookieTab], "logged-in", null).reason, "cookie deleted");
@@ -324,7 +327,26 @@ test("the popup's logout note names what ended the session", function () {
   assert.match(matcher.logoutNote({ reason: "cookie deleted", minutesSinceLastNudge: 3, minutesLeftAtLastNudge: 45 }),
     /page timer or the Logout button/);
   assert.match(matcher.logoutNote({ reason: "eRA timer cookie expired" }), /timer ran out/);
+  assert.match(matcher.logoutNote({ reason: "ended while no eRA tab was open", estimatedEndAt: 1, minutesSinceLastNudge: 3, minutesLeftAtLastNudge: 45 }),
+    /No eRA tab was open/);
   assert.equal(matcher.logoutNote(null), null);
+});
+
+test("a Logout noticed during a tick never gets the server or hard-limit note", function () {
+  var loginTab = { isLoginPage: true, path: "/commons/authi/public/do" };
+  var deletedTab = { managerPresent: true, minsLeftBefore: null, path: "/commons/home" };
+  var cases = [
+    matcher.decideSession([loginTab], "logged-in", { state: "missing" }),
+    matcher.decideSession([loginTab], "logged-in", { state: "expired" }),
+    matcher.decideSession([deletedTab], "logged-in", null),
+    matcher.decideSession([], "logged-in", { state: "missing" }),
+    matcher.decideSession([], "logged-in", { state: "expired" })
+  ];
+  cases.forEach(function (decision) {
+    assert.equal(decision.status, "logged-out");
+    var note = matcher.logoutNote({ reason: decision.reason, minutesSinceLastNudge: 1, minutesLeftAtLastNudge: 44 });
+    assert.ok(note && !/hard limit/.test(note), decision.reason + ": " + note);
+  });
 });
 
 test("formats server timeouts, server warnings and the no-tabs cookie state", function () {
@@ -338,5 +360,9 @@ test("formats server timeouts, server warnings and the no-tabs cookie state", fu
     "10:04 no eRA tabs open, cookie 30.0 min; still logged in, nothing to nudge (4-minute timer stopped)"
   );
   assert.equal(logAt({ type: "no-tabs", from: "logged-in", to: "logged-out", cookie: "missing", minsLeft: null }), "10:04 no eRA tabs open, cookie deleted");
+  assert.equal(
+    logAt({ type: "no-tabs", from: "logged-in", to: "idle", cookie: "live", minsLeft: 30 }),
+    "10:04 no eRA tabs open, cookie 30.0 min; not keeping the session alive until an eRA tab is open (4-minute timer stopped)"
+  );
   assert.equal(logAt({ type: "no-tabs", from: "logged-in", to: "logged-in", cookie: null }), "10:04 no eRA tabs open, cookie unreadable; still logged in, nothing to nudge (4-minute timer stopped)");
 });

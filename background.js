@@ -11,13 +11,19 @@ var LATE_ALARM_MS = 60 * 1000;
 var LOGOUT_AT_STEP_MS = 60 * 1000;
 var ERA_TAB_QUERY = { url: ["https://*.era.nih.gov/*"] };
 var CONTENT_FILES = ["src/matcher.js", "content.js"];
+var IDLE_END_REASON = "ended while no eRA tab was open";
 var DEFAULT_STATE = {
   enabled: true,
   pingServer: false,
   sessionStatus: "unknown",
   sessionStartedAt: null,
   lastNudgeAt: null,
+  // eRA's logout time as seen right after the last nudge. eraLogoutAt moves
+  // with every cookie write; this one moves only with a nudge.
+  lastNudgeTimerAt: null,
   eraLogoutAt: null,
+  // When the last eRA tab closed while the session was live ("idle").
+  idleSince: null,
   lastUserPageLoadAt: null,
   lastAutoClick: null,
   lastServerResult: null,
@@ -80,6 +86,9 @@ async function updateBadge() {
   } else if (state.sessionStatus === "logged-in") {
     await chrome.action.setBadgeBackgroundColor({ color: "#15803d" });
     await chrome.action.setBadgeText({ text: "ON" });
+  } else if (state.sessionStatus === "idle") {
+    await chrome.action.setBadgeBackgroundColor({ color: "#6b7280" });
+    await chrome.action.setBadgeText({ text: "…" });
   } else {
     await chrome.action.setBadgeBackgroundColor({ color: "#6b7280" });
     await chrome.action.setBadgeText({ text: "?" });
@@ -232,14 +241,16 @@ function logoutRecord(prior, detail, at) {
     minutesSinceLastNudge: minutesBetween(lastNudgeAt, at),
     lastUserPageLoadAt: prior.lastUserPageLoadAt,
     minutesSinceLastPageLoad: minutesBetween(prior.lastUserPageLoadAt, at),
-    minutesLeftAtLastNudge: lastNudgeAt === null || typeof prior.eraLogoutAt !== "number" ? null :
-      matcher.roundMinutes((prior.eraLogoutAt - lastNudgeAt) / 60000),
+    minutesLeftAtLastNudge: lastNudgeAt === null || typeof prior.lastNudgeTimerAt !== "number" ? null :
+      matcher.roundMinutes((prior.lastNudgeTimerAt - lastNudgeAt) / 60000),
+    estimatedEndAt: typeof detail.estimatedEndAt === "number" ? detail.estimatedEndAt : null,
     lastServerPing: prior.lastServerResult
   };
 }
 
 // The one code path for every status change, whatever noticed it. Callers
-// run inside serialized(). next is { status, reason, path }.
+// run inside serialized(). next is { status, reason, path }, plus
+// { silent, estimatedEndAt } for a session that ended while nothing watched.
 async function commitStatus(prior, next, at, updates) {
   var priorStatus = prior.sessionStatus;
   var nextStatus = next.status;
@@ -248,10 +259,14 @@ async function commitStatus(prior, next, at, updates) {
     updates.eraLogoutAt = null;
     updates.serverWarning = null;
   }
+  // Leaving idle for logged-in keeps the sign-in time unless the caller says
+  // the session was a new one.
   if (nextStatus === "logged-in" && priorStatus !== "logged-in") {
-    updates.sessionStartedAt = at;
+    if (priorStatus !== "idle" && !("sessionStartedAt" in updates)) updates.sessionStartedAt = at;
     if (!("serverWarning" in updates)) updates.serverWarning = null;
   }
+  if (nextStatus === "idle" && priorStatus !== "idle") updates.idleSince = at;
+  if (nextStatus !== "idle" && priorStatus === "idle") updates.idleSince = null;
 
   if (priorStatus !== nextStatus) {
     await appendDiagnosticEntries([{
@@ -264,8 +279,10 @@ async function commitStatus(prior, next, at, updates) {
     }]);
   }
 
-  // The logout record and the notification share this one condition.
-  var sessionEnded = priorStatus === "logged-in" && nextStatus === "logged-out";
+  // Every end of a session is recorded. Only one noticed as it happened is
+  // notified: an end found after idle is hours old and never notifies.
+  var sessionEnded = (priorStatus === "logged-in" || priorStatus === "idle") && nextStatus === "logged-out";
+  var notify = sessionEnded && priorStatus === "logged-in" && !next.silent;
   if (sessionEnded) {
     updates.logoutRecords = [logoutRecord(prior, next, at)].concat(prior.logoutRecords || []).slice(0, 10);
   }
@@ -273,7 +290,7 @@ async function commitStatus(prior, next, at, updates) {
   await setState(updates);
   await updateBadge();
   if (priorStatus !== nextStatus || nextStatus === "logged-out") await configureAlarm();
-  if (sessionEnded) {
+  if (notify) {
     await chrome.notifications.create("era-session-ended", {
       type: "basic",
       iconUrl: "icons/icon128.png",
@@ -300,6 +317,7 @@ async function applyResults(results, at, options) {
     });
     if (active) {
       updates.lastNudgeAt = at;
+      updates.lastNudgeTimerAt = active.logoutAtAfter;
       updates.eraLogoutAt = active.logoutAtAfter;
       var pinged = results.find(function (result) { return result.serverCalled; });
       updates.lastServerResult = matcher.describeServer(pinged || { pingServer: !!prior.pingServer });
@@ -322,34 +340,76 @@ async function applyResults(results, at, options) {
   return commitStatus(prior, decision, at, updates);
 }
 
-// With no eRA tab open there is nothing to nudge, so the alarm stops, but
-// the cookie still says whether the session is alive.
+// The first evidence after idle decides what happened while no eRA tab was
+// open. evidence: { cookie, tabsOpen, loginPage, livePage, path }. A live
+// cookie means the session carried on; a stale or missing cookie, or a login
+// page without a live cookie, means it ended some time ago, so it is recorded
+// without a notification. Also used after a browser restart, when prior may
+// still be logged-in. Returns the state afterwards.
+async function resolveIdle(prior, at, evidence) {
+  var cookie = evidence.cookie;
+  var live = !!cookie && cookie.state === "live";
+  var next;
+  var updates = {};
+  if ((cookie && !live) || (evidence.loginPage && !live)) {
+    var estimate = cookie && typeof cookie.logoutAt === "number" ? cookie.logoutAt : prior.eraLogoutAt;
+    next = {
+      status: "logged-out",
+      reason: IDLE_END_REASON,
+      path: evidence.path || null,
+      silent: true,
+      estimatedEndAt: typeof estimate === "number" ? Math.min(estimate, at) : null
+    };
+  } else if (evidence.livePage || (live && evidence.tabsOpen)) {
+    next = { status: "logged-in", reason: "eRA tab open again", path: evidence.path || null };
+    // A cookie set before idle began belongs to some other, older session.
+    if (live && typeof prior.idleSince === "number" && cookie.logoutAt <= prior.idleSince) updates.sessionStartedAt = at;
+    if (live) updates.eraLogoutAt = cookie.logoutAt;
+  } else if (live) {
+    next = { status: "idle", reason: "no eRA tabs open", path: null };
+    updates.eraLogoutAt = cookie.logoutAt;
+  } else {
+    return prior;
+  }
+  await commitStatus(prior, next, at, updates);
+  return getState();
+}
+
+// With no eRA tab open there is nothing to nudge, so the alarm stops. A
+// session the cookie still shows as live goes idle: the extension no longer
+// keeps it alive, and the next evidence says whether it survived.
 async function handleNoTabs(state, at, entries) {
   var cookie = await readEraCookie(at);
   var priorStatus = state.sessionStatus;
-  var next;
-  if (!cookie) {
-    next = { status: priorStatus };
-  } else if (cookie.state === "live") {
-    next = priorStatus === "logged-out" ? { status: "unknown", reason: "no eRA tabs open" } :
-      { status: "logged-in", reason: "live eRA timer cookie" };
-  } else if (priorStatus === "logged-in") {
-    next = matcher.decideSession([], priorStatus, cookie);
+  var after;
+  if (priorStatus === "idle") {
+    after = (await resolveIdle(state, at, { cookie: cookie, tabsOpen: false })).sessionStatus;
   } else {
-    next = { status: "unknown", reason: "no eRA tabs open" };
+    var next;
+    if (!cookie) {
+      next = { status: priorStatus === "logged-in" ? "idle" : priorStatus, reason: "no eRA tabs open" };
+    } else if (cookie.state === "live") {
+      next = priorStatus === "logged-out" ? { status: "unknown", reason: "no eRA tabs open" } :
+        { status: "idle", reason: "no eRA tabs open" };
+    } else if (priorStatus === "logged-in") {
+      next = matcher.decideSession([], priorStatus, cookie);
+    } else {
+      next = { status: "unknown", reason: "no eRA tabs open" };
+    }
+    var updates = {};
+    if (cookie) updates.eraLogoutAt = cookie.state === "live" ? cookie.logoutAt : null;
+    await commitStatus(state, next, at, updates);
+    after = next.status;
   }
   entries.push({
     type: "no-tabs",
     at: at,
     from: priorStatus,
-    to: next.status,
+    to: after,
     cookie: cookie ? cookie.state : null,
     minsLeft: cookie ? matcher.roundMinutes(cookie.minsLeft) : null
   });
   await appendDiagnosticEntries(entries);
-  var updates = {};
-  if (cookie) updates.eraLogoutAt = cookie.state === "live" ? cookie.logoutAt : null;
-  await commitStatus(state, next, at, updates);
   await chrome.alarms.clear(ALARM_NAME);
 }
 
@@ -372,8 +432,18 @@ async function runTick(alarm) {
       return;
     }
 
-    // One server ping per alarm per keep-alive URL, from one active tab.
     var probes = await probeTabs(tabs);
+    if (state.sessionStatus === "idle") {
+      var probed = probes.map(function (probe) { return probe.result; });
+      state = await resolveIdle(state, at, {
+        cookie: await readEraCookie(at),
+        tabsOpen: true,
+        loginPage: probed.some(function (result) { return result.isLoginPage; }),
+        livePage: probed.some(function (result) { return matcher.classifyTabResult(result, "idle") === "active"; })
+      });
+    }
+
+    // One server ping per alarm per keep-alive URL, from one active tab.
     var pingTabIds = {};
     if (state.pingServer) {
       var seenUrls = {};
@@ -421,6 +491,15 @@ async function handlePageReady(message, sender) {
   }]);
   if (!result.isLoginPage && result.managerPresent) await setState({ lastUserPageLoadAt: at });
 
+  if (state.sessionStatus === "idle") {
+    state = await resolveIdle(state, at, {
+      cookie: await readEraCookie(Date.now()),
+      tabsOpen: true,
+      loginPage: result.isLoginPage,
+      livePage: matcher.classifyTabResult(result, "idle") === "active",
+      path: result.path
+    });
+  }
   var classification = matcher.classifyTabResult(result, state.sessionStatus);
   if (classification === "active") {
     await applyResults([result], at);
@@ -442,6 +521,10 @@ async function handleCookieChange(change) {
   var at = Date.now();
   var cookie = await readEraCookie(at);
   if (!cookie) return;
+  if (state.sessionStatus === "idle") {
+    await resolveIdle(state, at, { cookie: cookie, tabsOpen: (await queryEraTabs()).length > 0 });
+    return;
+  }
   if (cookie.state === "live") {
     if (change.kind !== "live") return;
     if (state.sessionStatus !== "logged-in") {
@@ -517,7 +600,19 @@ async function handleEnabledChange(newValue) {
   await updateBadge();
 }
 
+// Chrome drops eRA's cookie when it quits (it has no expiry), so after a
+// restart a session last seen live or idle is judged like a return from idle.
+async function resolveAfterRestart() {
+  var state = await getState();
+  if (!state.enabled || (state.sessionStatus !== "idle" && state.sessionStatus !== "logged-in")) return;
+  var at = Date.now();
+  var cookie = await readEraCookie(at);
+  if (!cookie) return;
+  await resolveIdle(state, at, { cookie: cookie, tabsOpen: (await queryEraTabs()).length > 0 });
+}
+
 async function startUp(defaultsToFill) {
+  if (!defaultsToFill) await serialized(resolveAfterRestart);
   if (defaultsToFill) {
     var stored = await chrome.storage.local.get(["enabled", "pingServer"]);
     var fill = {};

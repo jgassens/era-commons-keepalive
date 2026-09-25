@@ -228,14 +228,16 @@
 
   // The one place that decides what a tab result says about the session.
   // Returns { classification: "active" | "ended" | "neutral", reason, weak }.
-  // "weak" ended evidence rests only on the cookie this tab saw, so a live
-  // cookie read straight from Chrome overrides it. priorStatus matters only
+  // "weak" ended evidence rests only on the cookie this tab saw, or on the
+  // tab's URL alone, so a live cookie read straight from Chrome overrides it.
+  // priorStatus matters only
   // for a missing or expired cookie: that ends the session only when the
   // extension had already seen it logged in.
   function explainTabResult(result, priorStatus) {
     if (!result || result.ignored) return { classification: "neutral", reason: "ignored page" };
     // Judged from the tab's URL, so this holds even for a tab we cannot reach.
-    if (result.isLoginPage) return { classification: "ended", reason: "login or logout page" };
+    // eRA deletes its cookie before it logs out, so a live cookie outranks it.
+    if (result.isLoginPage) return { classification: "ended", reason: "login or logout page", weak: true, loginPage: true };
     if (result.unreachable) return { classification: "neutral", reason: "could not reach tab" };
     if (result.disabled) return { classification: "neutral", reason: "extension off in this tab" };
     var live = hasLiveCookie(result);
@@ -272,11 +274,17 @@
       explanation.path = result.path || null;
       return explanation;
     });
+    var cookieState = cookie && cookie.state;
     function decided(status, test) {
       var match = explained.find(test);
-      return match ? { status: status, reason: match.reason, path: match.path } : null;
+      if (!match) return null;
+      var reason = match.reason;
+      // A login page with the cookie gone is eRA's own logout, and says so.
+      if (match.loginPage && (cookieState === "missing" || cookieState === "expired")) {
+        reason += cookieState === "expired" ? " (eRA timer cookie expired)" : " (eRA timer cookie deleted)";
+      }
+      return { status: status, reason: reason, path: match.path };
     }
-    var cookieState = cookie && cookie.state;
     var found = decided("logged-in", function (item) { return item.classification === "active"; }) ||
       decided("logged-out", function (item) { return item.classification === "ended" && !item.weak; });
     if (found) return found;
@@ -312,6 +320,9 @@
     }
     if (/cookie expired/i.test(reason)) {
       return "eRA's own timer ran out before the next activity nudge.";
+    }
+    if (typeof record.estimatedEndAt === "number" || /no eRA tab/i.test(reason)) {
+      return "No eRA tab was open, so nothing kept the session alive; eRA's timer ran out or the browser was closed.";
     }
     if (typeof record.minutesSinceLastNudge === "number" && typeof record.minutesLeftAtLastNudge === "number" &&
       record.minutesSinceLastNudge < record.minutesLeftAtLastNudge) {
@@ -394,7 +405,8 @@
       }
       var cookieText = entry.cookie ? ", " + describeCookie(entry.minsLeft) : ", cookie unreadable";
       return prefix + "no eRA tabs open" + cookieText +
-        (entry.to === "logged-in" ? "; still logged in, nothing to nudge (4-minute timer stopped)" : "");
+        (entry.to === "idle" ? "; not keeping the session alive until an eRA tab is open (4-minute timer stopped)" :
+          entry.to === "logged-in" ? "; still logged in, nothing to nudge (4-minute timer stopped)" : "");
     }
     if (entry.type === "server-warning") {
       return prefix + "server rejected keep-alive (redirect) " + path + "; eRA timer still live, still nudging";
