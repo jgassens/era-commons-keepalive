@@ -37,9 +37,32 @@ test("never selects logout or sign-out actions in a timeout dialog", function ()
   assert.equal(matcher.isContinueButtonText("Sign out"), false);
 });
 
-test("detects login-page redirect URLs and logged-out page text", function () {
+test("detects login-page redirects and strong logged-out page text", function () {
   assert.equal(matcher.isLoginPage("https://secure.login.gov/?state=x", ""), true);
-  assert.equal(matcher.isLoginPage("https://public.era.nih.gov/commons/login", ""), true);
+  assert.equal(matcher.isLoginPage("https://public.era.nih.gov/commons/login-type", ""), true);
   assert.equal(matcher.isLoginPage("https://public.era.nih.gov/commons/", "You have been logged out."), true);
+  assert.equal(matcher.isLoginPage("https://public.era.nih.gov/commons/", "Your session has expired", false), true);
   assert.equal(matcher.isLoginPage("https://public.era.nih.gov/commons/home", "Welcome to eRA Commons"), false);
+});
+
+test("does not treat Login.gov text on a page with a logout control as logged out", function () {
+  assert.equal(
+    matcher.isLoginPage(
+      "https://public.era.nih.gov/commons/home",
+      "Account protection is provided by Login.gov. Logout",
+      true
+    ),
+    false
+  );
+});
+
+test("ping URLs discard the current path and query string", function () {
+  assert.equal(
+    matcher.pingUrlFor("https://public.era.nih.gov/commons/apply?action=submit#review"),
+    "https://public.era.nih.gov/commons/"
+  );
+  assert.equal(
+    matcher.pingUrlFor("https://staging.era.nih.gov/anything/here?dangerous=true"),
+    "https://staging.era.nih.gov/"
+  );
 });

@@ -54,12 +54,40 @@
     return null;
   }
 
-  function isLoginPage(url, pageText) {
-    var address = String(url || "").toLowerCase();
-    var text = String(pageText || "").replace(/\s+/g, " ").toLowerCase();
-    var loginUrl = /(^|\.)login\.gov(?:[/:]|$)|\/(?:login|signin|sign-in|logout|logged-out)(?:[/?#.]|$)/.test(address);
-    var loginText = /\b(?:you\s+(?:have\s+been\s+)?logged\s+out|session\s+(?:has\s+)?ended|sign\s+in\s+(?:to|with)|log\s+in\s+(?:to|with)|login\.gov)\b/.test(text);
-    return loginUrl || loginText;
+  function pingUrlFor(locationLike) {
+    var source = locationLike || "";
+    var hostname = String(source.hostname || source.host || "").toLowerCase();
+    var origin = source.origin;
+
+    if (!hostname || !origin) {
+      try {
+        var parsed = new URL(String(source.href || source));
+        hostname = parsed.hostname.toLowerCase();
+        origin = parsed.origin;
+      } catch (error) {
+        return "";
+      }
+    }
+
+    if (hostname === "public.era.nih.gov") return "https://public.era.nih.gov/commons/";
+    return String(origin).replace(/\/+$/, "") + "/";
+  }
+
+  function isLoginUrl(url) {
+    try {
+      var parsed = new URL(String(url || ""));
+      var hostname = parsed.hostname.toLowerCase();
+      return hostname === "login.gov" || /\.login\.gov$/.test(hostname) ||
+        /(?:^|\/)login-type(?:\/|$)/i.test(parsed.pathname);
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function isLoginPage(url, visibleText, hasLogoutControl) {
+    var text = String(visibleText || "").replace(/\s+/g, " ").trim();
+    var loggedOutText = /\byou\s+have\s+been\s+logged\s+out\b|\byour\s+session\s+has\s+(?:expired|ended|timed\s+out)\b|\bsession\s+expired\b/i.test(text);
+    return isLoginUrl(url) || (loggedOutText && !hasLogoutControl);
   }
 
   return {
@@ -67,6 +95,8 @@
     isTimeoutWarningText: isTimeoutWarningText,
     isContinueButtonText: isContinueButtonText,
     findTimeoutContinueButton: findTimeoutContinueButton,
+    pingUrlFor: pingUrlFor,
+    isLoginUrl: isLoginUrl,
     isLoginPage: isLoginPage
   };
 });

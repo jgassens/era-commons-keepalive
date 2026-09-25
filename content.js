@@ -18,25 +18,53 @@
     report({ type: "auto-click", at: Date.now() });
   }
 
+  function pageSignals(documentLike) {
+    var body = documentLike && documentLike.body;
+    if (!body) return { visibleText: "", hasLogoutControl: false };
+
+    var textBody = body.cloneNode(true);
+    Array.prototype.forEach.call(textBody.querySelectorAll("script, style, noscript"), function (node) {
+      node.remove();
+    });
+
+    var hasLogoutControl = Array.prototype.some.call(documentLike.querySelectorAll("a, button"), function (control) {
+      var text = String(control.textContent || "");
+      var href = String(control.getAttribute("href") || "");
+      return /\b(?:logout|log\s+out|sign\s+out)\b/i.test(text) ||
+        /\b(?:logout|log\s+out|sign\s+out)\b/i.test(href);
+    });
+
+    return {
+      visibleText: textBody.textContent || "",
+      hasLogoutControl: hasLogoutControl
+    };
+  }
+
+  function isLoggedOutDocument(url, documentLike) {
+    var signals = pageSignals(documentLike);
+    return matcher.isLoginPage(url, signals.visibleText, signals.hasLogoutControl);
+  }
+
   function reportPageState() {
     report({
       type: "era-page-ready",
       url: location.href,
       at: Date.now(),
-      isLoginPage: matcher.isLoginPage(location.href, document.body && document.body.innerText)
+      isLoginPage: isLoggedOutDocument(location.href, document)
     });
   }
 
   chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     if (!message || message.type !== "keep-alive-ping") return;
-    fetch(location.href, { method: "GET", credentials: "include", cache: "no-store" })
+    fetch(matcher.pingUrlFor(location), { method: "GET", credentials: "include", cache: "no-store" })
       .then(function (response) {
-        var login = matcher.isLoginPage(response.url, "");
+        var login = matcher.isLoginUrl(response.url);
         if (login) return { success: false, loggedOut: true };
         return response.text().then(function (body) {
+          var parsed = new DOMParser().parseFromString(body, "text/html");
           return {
             success: response.ok,
-            loggedOut: matcher.isLoginPage(response.url, body.slice(0, 200000))
+            loggedOut: isLoggedOutDocument(response.url, parsed)
           };
         });
       })
