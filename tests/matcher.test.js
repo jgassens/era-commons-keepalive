@@ -430,4 +430,8 @@ test("formats session lengths and names eRA's apparent session limit", function 
     "eRA's server stopped accepting your session around " + matcher.clockTime(record.estimatedEndAt) + ".");
   assert.match(matcher.formatLogLine({ type: "server-refused", at: start, path: "/commonsplus/home.era" }),
     /server refused keep-alive — rechecking in 30 s \(\/commonsplus\/home\.era\)$/);
+  assert.match(matcher.formatLogLine({ type: "server-recheck-retry", at: start, retry: 2, of: 3 }),
+    /server recheck: no eRA tab to ping — trying again in 30 s \(2 of 3\)$/);
+  assert.match(matcher.formatLogLine({ type: "server-recheck-deferred", at: start }),
+    /server recheck: still no eRA tab to ping — the next regular check will ask eRA's server$/);
 });

@@ -583,21 +583,186 @@ test("after a server end, stale-page cookie writes do not restore logged-in; a p
 });
 
 test("after a server end, an accepted ping restores logged-in as a new session", async function () {
+  // A tick that still reaches the stale tab after a server end, from either
+  // status the extension can be in then (unknown after the no-tabs path).
+  for (var prior of ["logged-out", "unknown"]) {
+    var fake = makeFake({
+      storage: { sessionStatus: prior, pingServer: true, serverEndedAt: Date.now() - 5 * MINUTE, sessionStartedAt: 3 },
+      tabs: [eraTab(1, HOME, liveManager({ keepAliveUrl: ALIVE_URL, server: "redirect" }))]
+    });
+    await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+    assert.equal(fake.store.sessionStatus, prior);
+    assert.equal(typeof fake.store.serverEndedAt, "number");
+    fake.tabs[0].page.server = "ok";
+    var at = Date.now();
+    await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+    assert.equal(fake.store.sessionStatus, "logged-in", prior);
+    assert.equal(fake.store.serverEndedAt, null);
+    assert.ok(fake.store.sessionStartedAt >= at);
+  }
+});
+
+test("switching the extension off and on after a server end keeps it logged-out until a real sign-in", async function () {
   var fake = serverEndFake();
   await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
   await fireRecheck(fake);
   assert.equal(fake.store.sessionStatus, "logged-out");
-  // Switching the extension off and on sets unknown and restarts ticking.
+  var endedAt = fake.store.serverEndedAt;
+  var records = fake.store.logoutRecords.length;
+
   await fake.chrome.storage.local.set({ enabled: false });
+  await fake.drain();
   await fake.chrome.storage.local.set({ enabled: true });
   await fake.drain();
-  fake.tabs[0].page.server = "redirect";
-  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
-  assert.notEqual(fake.store.sessionStatus, "logged-in");
-  fake.tabs[0].page.server = "ok";
-  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  assert.equal(fake.store.sessionStatus, "logged-out");
+  assert.equal(fake.store.serverEndedAt, endedAt);
+  assert.equal(fake.alarms["era-keep-alive"], undefined);
+  assert.equal(fake.alarms["era-server-recheck"], undefined);
+  assert.equal(fake.calls.badgeText[fake.calls.badgeText.length - 1], "!");
+  assert.equal(fake.store.logoutRecords.length, records);
+  assert.equal(fake.calls.notifications.length, 1);
+
+  // Activity on the stale tab still does not count.
+  var pingsBefore = fake.tabs[0].pings;
+  await fake.setEraCookie(Date.now() + 45 * MINUTE);
+  await fake.bg.handleMessage(pageReady({ loadedAt: endedAt - 60 * MINUTE }), { tab: { id: 1 } });
+  await fake.drain();
+  assert.equal(fake.store.sessionStatus, "logged-out");
+  assert.equal(fake.alarms["era-keep-alive"], undefined);
+  assert.equal(fake.tabs[0].pings, pingsBefore);
+
+  // A page eRA serves after the user signs in again does.
+  var at = Date.now() + 1;
+  await fake.bg.handleMessage(pageReady({ at: at, loadedAt: at }), { tab: { id: 1 } });
   assert.equal(fake.store.sessionStatus, "logged-in");
   assert.equal(fake.store.serverEndedAt, null);
+  assert.ok(fake.alarms["era-keep-alive"]);
+
+  // Without a server end, off and on still starts from unknown.
+  var plain = makeFake({ storage: { sessionStatus: "logged-out" }, tabs: [eraTab(1, HOME, liveManager())] });
+  await plain.chrome.storage.local.set({ enabled: false });
+  await plain.chrome.storage.local.set({ enabled: true });
+  await plain.drain();
+  assert.equal(plain.store.sessionStatus, "unknown");
+});
+
+// The stale tab after eRA's server sent it to its login page. The cookie jar
+// still holds the live cookie the last nudge wrote.
+function sendTabToLogin(fake) {
+  fake.tabs[0].url = LOGIN;
+  fake.tabs[0].page = { managerPresent: false, logoutAt: null, keepAliveUrl: null, server: "ok" };
+}
+
+function assertServerEnd(fake, firstRefusalAt, startedAt) {
+  assert.equal(fake.store.sessionStatus, "logged-out");
+  assert.equal(fake.store.logoutRecords.length, 1);
+  var record = fake.store.logoutRecords[0];
+  assert.equal(record.reason, "eRA's server ended the session (keep-alive refused)");
+  assert.equal(record.serverEnded, true);
+  assert.equal(record.firstRefusalAt, firstRefusalAt);
+  assert.equal(record.estimatedEndAt, firstRefusalAt);
+  assert.equal(record.sessionStartedAt, startedAt);
+  assert.equal(matcher.sessionLengthMinutes(record), 130);
+  assert.equal(fake.store.serverEndedAt, record.loggedOutDetectedAt);
+  assert.equal(fake.calls.notifications.length, 1);
+  assert.equal(fake.calls.notifications[0].title, "eRA ended your session — log in again");
+  assert.equal(fake.alarms["era-keep-alive"], undefined);
+  assert.equal(fake.alarms["era-server-recheck"], undefined);
+  assert.equal(fake.store.firstRefusalAt, null);
+}
+
+test("a login page while a refusal is pending confirms the server end (page load or recheck)", async function () {
+  for (var via of ["page-ready", "recheck", "tick"]) {
+    var fake = serverEndFake();
+    var startedAt = fake.store.sessionStartedAt;
+    fake.alarms["era-keep-alive"] = { name: "era-keep-alive", periodInMinutes: 4 };
+    await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+    var firstRefusalAt = fake.store.firstRefusalAt;
+    assert.equal(typeof firstRefusalAt, "number");
+    assert.equal(fake.jar.length, 1);
+
+    sendTabToLogin(fake);
+    if (via === "page-ready") {
+      await fake.bg.handleMessage(pageReady({ path: "/commonsplus/public/login.era", isLoginPage: true, managerPresent: false, minsLeft: null }), { tab: { id: 1 } });
+      await fake.drain();
+    } else if (via === "recheck") {
+      await fireRecheck(fake);
+    } else {
+      await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+    }
+    assertServerEnd(fake, firstRefusalAt, startedAt);
+
+    // Nothing more happens: a later recheck or tick records nothing new.
+    await fireRecheck(fake);
+    await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+    assert.equal(fake.store.logoutRecords.length, 1, via);
+    assert.equal(fake.calls.notifications.length, 1, via);
+  }
+});
+
+test("a login page with no refusal pending is still judged by the cookie", async function () {
+  var fake = serverEndFake();
+  fake.tabs[0].page.server = "ok";
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  sendTabToLogin(fake);
+  await fake.bg.handleMessage(pageReady({ path: "/commonsplus/public/login.era", isLoginPage: true, managerPresent: false, minsLeft: null }), { tab: { id: 1 } });
+  await fake.drain();
+  assert.equal(fake.store.sessionStatus, "logged-in");
+  assert.equal(fake.store.serverEndedAt, null);
+  assert.equal((fake.store.logoutRecords || []).length, 0);
+});
+
+test("a recheck with no tab to ping is re-armed three times, then left to the regular tick", async function () {
+  var fake = serverEndFake();
+  var startedAt = fake.store.sessionStartedAt;
+  fake.alarms["era-keep-alive"] = { name: "era-keep-alive", periodInMinutes: 4 };
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  var firstRefusalAt = fake.store.firstRefusalAt;
+
+  // The tab cannot be reached (say, mid-navigation); the cookie is still live.
+  fake.tabs[0].page.unreachable = true;
+  for (var retry = 1; retry <= 3; retry += 1) {
+    // Chrome removes a one-shot alarm once it fires.
+    delete fake.alarms["era-server-recheck"];
+    await fireRecheck(fake);
+    assert.equal(fake.store.sessionStatus, "logged-in");
+    assert.equal(fake.store.firstRefusalAt, firstRefusalAt);
+    assert.equal(fake.store.recheckRetries, retry);
+    assert.equal(fake.alarms["era-server-recheck"].delayInMinutes, 0.5);
+  }
+  delete fake.alarms["era-server-recheck"];
+  await fireRecheck(fake);
+  assert.equal(fake.alarms["era-server-recheck"], undefined);
+  assert.equal(fake.store.sessionStatus, "logged-in");
+  assert.equal(fake.store.firstRefusalAt, firstRefusalAt);
+  assert.ok(fake.alarms["era-keep-alive"]);
+  var lines = logLines(fake);
+  assert.ok(lines.some(function (line) { return /server recheck: no eRA tab to ping — trying again in 30 s \(3 of 3\)$/.test(line); }), lines.join("\n"));
+  assert.ok(lines.some(function (line) { return /server recheck: still no eRA tab to ping — the next regular check will ask eRA's server$/.test(line); }), lines.join("\n"));
+  assert.equal(fake.calls.notifications.length, 0);
+
+  // The next regular tick reaches the tab and the server refuses again.
+  fake.tabs[0].page.unreachable = false;
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  assertServerEnd(fake, firstRefusalAt, startedAt);
+  assert.equal(fake.store.recheckRetries, 0);
+});
+
+test("a recheck whose ping is accepted clears the retry count", async function () {
+  var fake = serverEndFake();
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  fake.tabs[0].page.unreachable = true;
+  delete fake.alarms["era-server-recheck"];
+  await fireRecheck(fake);
+  assert.equal(fake.store.recheckRetries, 1);
+  fake.tabs[0].page.unreachable = false;
+  fake.tabs[0].page.server = "ok";
+  delete fake.alarms["era-server-recheck"];
+  await fireRecheck(fake);
+  assert.equal(fake.store.sessionStatus, "logged-in");
+  assert.equal(fake.store.firstRefusalAt, null);
+  assert.equal(fake.store.recheckRetries, 0);
+  assert.equal(fake.alarms["era-server-recheck"], undefined);
 });
 
 test("a server timeout is logged and keeps the session", async function () {

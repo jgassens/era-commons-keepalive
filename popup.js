@@ -9,6 +9,7 @@ var defaults = {
   eraLogoutAt: null,
   lastAutoClick: null,
   serverWarning: null,
+  serverEndedAt: null,
   logoutRecords: [],
   diagnosticLog: []
 };
@@ -116,11 +117,19 @@ function renderDiagnosticLog(entries) {
   });
 }
 
-function renderStatus(state) {
+// The server-end sentence belongs only to the end serverEndedAt marks: the
+// latest record must be that end, noticed at that same moment.
+function currentServerEnd(state) {
   var latest = listFrom(state.logoutRecords)[0];
+  return isNumber(state.serverEndedAt) && matcher.isServerEndRecord(latest) &&
+    latest.loggedOutDetectedAt === state.serverEndedAt ? latest : null;
+}
+
+function renderStatus(state) {
+  var serverEnd = currentServerEnd(state);
   document.getElementById("status").textContent = !state.enabled ? "Disabled" :
     state.sessionStatus === "logged-in" ? "Enabled — logged in" :
-    state.sessionStatus === "logged-out" && matcher.isServerEndRecord(latest) ? matcher.serverEndStatus(latest) :
+    state.sessionStatus === "logged-out" && serverEnd ? matcher.serverEndStatus(serverEnd) :
     state.sessionStatus === "logged-out" ? "Enabled — logged out" :
     state.sessionStatus === "idle" ? "No eRA tab open — not keeping the session alive" : "Enabled — status unknown";
   document.getElementById("signed-in").textContent =

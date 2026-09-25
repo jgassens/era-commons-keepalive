@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Session Keeper for eRA Commons (unofficial)",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Unofficial helper that keeps your own NIH eRA Commons session from timing out while an eRA tab is open.",
   "permissions": ["storage", "alarms", "notifications", "scripting", "cookies"],
   "host_permissions": ["https://*.era.nih.gov/*"],

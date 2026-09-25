@@ -240,7 +240,7 @@ test("a server-ended session shows in the status line, with each session's lengt
     };
   }
   var latest = serverEnd(130, 0);
-  var popup = renderPopup({ sessionStatus: "logged-out", logoutRecords: [latest, serverEnd(128, 1)] });
+  var popup = renderPopup({ sessionStatus: "logged-out", serverEndedAt: latest.loggedOutDetectedAt, logoutRecords: [latest, serverEnd(128, 1)] });
   await settle();
   var e = popup.elements;
   var matcher = popup.context.EraKeepAlive;
@@ -259,4 +259,36 @@ test("a server-ended session shows in the status line, with each session's lengt
   await settle();
   assert.equal(again.elements.status.textContent, "Enabled — logged in");
   assert.equal(again.elements["session-pattern"].hidden, true);
+});
+
+test("the status line names a server end only while that end is the current one", async function () {
+  var endedAt = Date.UTC(2026, 8, 25, 20, 0);
+  var record = {
+    loggedOutDetectedAt: endedAt,
+    reason: "eRA's server ended the session (keep-alive refused)",
+    serverEnded: true,
+    sessionStartedAt: endedAt - 130 * 60000,
+    estimatedEndAt: endedAt - 60000
+  };
+  var matcher = null;
+  var current = renderPopup({ sessionStatus: "logged-out", serverEndedAt: endedAt, logoutRecords: [record] });
+  await settle();
+  matcher = current.context.EraKeepAlive;
+  assert.equal(current.elements.status.textContent, matcher.serverEndStatus(record));
+
+  // Logged out again later without a new record (serverEndedAt cleared by a
+  // sign-in in between), or serverEndedAt marking some other end: the old
+  // record's time is not shown as current.
+  var cleared = renderPopup({ sessionStatus: "logged-out", serverEndedAt: null, logoutRecords: [record] });
+  await settle();
+  assert.equal(cleared.elements.status.textContent, "Enabled — logged out");
+  var other = renderPopup({ sessionStatus: "logged-out", serverEndedAt: endedAt + 3600000, logoutRecords: [record] });
+  await settle();
+  assert.equal(other.elements.status.textContent, "Enabled — logged out");
+
+  // The latest record is a different kind of logout.
+  var newer = { loggedOutDetectedAt: endedAt + 60000, reason: "eRA timer cookie deleted" };
+  var notServer = renderPopup({ sessionStatus: "logged-out", serverEndedAt: endedAt, logoutRecords: [newer, record] });
+  await settle();
+  assert.equal(notServer.elements.status.textContent, "Enabled — logged out");
 });

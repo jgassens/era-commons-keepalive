@@ -7,6 +7,9 @@ var ALARM_NAME = "era-keep-alive";
 // A one-shot second look after eRA's server first refuses a keep-alive.
 var RECHECK_ALARM_NAME = "era-server-recheck";
 var RECHECK_DELAY_MINUTES = 0.5;
+// A recheck that finds no eRA tab to ping from tries again this many times,
+// then leaves the refusal to the next regular tick.
+var RECHECK_MAX_RETRIES = 3;
 var NUDGE_PERIOD_MINUTES = 4;
 var LATE_ALARM_MS = 60 * 1000;
 // eRA rewrites its cookie on every click, key press and scroll. The stored
@@ -38,6 +41,8 @@ var DEFAULT_STATE = {
   // Refusals in a row since the last accepted ping; two end the session.
   firstRefusalAt: null,
   refusalCount: 0,
+  // Rechecks re-armed because no eRA tab could be pinged; see rearmRecheck().
+  recheckRetries: 0,
   // Set when eRA's server ended the session. Until a page eRA served after
   // this time, or an accepted ping, the stale eRA tab cannot restore logged-in.
   serverEndedAt: null,
@@ -294,6 +299,7 @@ async function commitStatus(prior, next, at, updates) {
   if (nextStatus !== "logged-in") {
     updates.firstRefusalAt = null;
     updates.refusalCount = 0;
+    updates.recheckRetries = 0;
   }
   // Leaving idle for logged-in keeps the sign-in time unless the caller says
   // the session was a new one; a session after a server end is always new.
@@ -356,6 +362,19 @@ function serverOutcome(results) {
   return { refused: refused || null, accepted: accepted };
 }
 
+// The decision when eRA's server has ended the session: a second refusal in
+// a row, or eRA's login page while the first refusal is still pending.
+function serverEndDecision(prior, path) {
+  return {
+    status: "logged-out",
+    reason: matcher.SERVER_END_REASON,
+    path: path,
+    serverEnd: true,
+    estimatedEndAt: prior.firstRefusalAt,
+    notification: matcher.serverEndNotification(prior.firstRefusalAt, prior.sessionStartedAt)
+  };
+}
+
 // Alarms and page loads both land here. options.nudged is true only when the
 // results came from a nudge (so they carry a fresh cookie and server answer);
 // options.cookie is the cookie read straight from Chrome, when there is one;
@@ -367,6 +386,13 @@ async function applyResults(results, at, options) {
   var updates = {};
   var cookie = options.cookie;
   if (options.fresh && decision.status === "logged-in") decision.fresh = true;
+  // While a refusal is pending, eRA's login or logout page confirms it: the
+  // stale tab's cookie would otherwise keep the session "live" until it ran out.
+  var refusalPending = prior.sessionStatus === "logged-in" && typeof prior.firstRefusalAt === "number";
+  var loginPage = refusalPending ? results.find(function (result) {
+    return result && !result.ignored && result.isLoginPage;
+  }) : null;
+  var accepted = false;
 
   if (options.nudged) {
     var active = results.find(function (result) {
@@ -383,10 +409,12 @@ async function applyResults(results, at, options) {
     }
 
     var server = serverOutcome(results);
+    accepted = server.accepted;
     if (server.accepted) {
       updates.lastServerAcceptedAt = at;
       updates.firstRefusalAt = null;
       updates.refusalCount = 0;
+      updates.recheckRetries = 0;
       updates.serverWarning = null;
       // eRA's server itself vouches for this session.
       if (decision.status === "logged-in") decision.fresh = true;
@@ -396,23 +424,21 @@ async function applyResults(results, at, options) {
       // server's answer is what counts. Once could be a blip; twice in a row
       // means the server has ended the session.
       if (typeof prior.firstRefusalAt === "number") {
-        decision = {
-          status: "logged-out",
-          reason: matcher.SERVER_END_REASON,
-          path: server.refused.path,
-          serverEnd: true,
-          estimatedEndAt: prior.firstRefusalAt,
-          notification: matcher.serverEndNotification(prior.firstRefusalAt, prior.sessionStartedAt)
-        };
+        decision = serverEndDecision(prior, server.refused.path);
         updates.serverEndedAt = at;
       } else {
         updates.firstRefusalAt = at;
         updates.refusalCount = 1;
+        updates.recheckRetries = 0;
         updates.serverWarning = { at: at, path: server.refused.path, recheck: true };
         await appendDiagnosticEntries([{ type: "server-refused", at: at, path: server.refused.path }]);
         await chrome.alarms.create(RECHECK_ALARM_NAME, { delayInMinutes: RECHECK_DELAY_MINUTES });
       }
     }
+  }
+  if (loginPage && !accepted && !decision.serverEnd) {
+    decision = serverEndDecision(prior, loginPage.path);
+    updates.serverEndedAt = at;
   }
   return commitStatus(prior, decision, at, updates);
 }
@@ -494,6 +520,22 @@ function nudgeEraTabs(alarm) {
   return serialized(function () { return runTick(alarm); });
 }
 
+// A recheck that could not ping (no eRA tab with a live timer) and saw no
+// login page leaves the refusal pending. Try again 30 s later, up to
+// RECHECK_MAX_RETRIES times; after that the next regular tick decides.
+async function rearmRecheck(at) {
+  var state = await getState();
+  if (state.sessionStatus !== "logged-in" || typeof state.firstRefusalAt !== "number") return;
+  var retries = typeof state.recheckRetries === "number" ? state.recheckRetries : 0;
+  if (retries < RECHECK_MAX_RETRIES) {
+    await setState({ recheckRetries: retries + 1 });
+    await chrome.alarms.create(RECHECK_ALARM_NAME, { delayInMinutes: RECHECK_DELAY_MINUTES });
+    await appendDiagnosticEntries([{ type: "server-recheck-retry", at: at, retry: retries + 1, of: RECHECK_MAX_RETRIES }]);
+  } else {
+    await appendDiagnosticEntries([{ type: "server-recheck-deferred", at: at }]);
+  }
+}
+
 // The one-shot recheck after a first refusal: a normal tick whose server
 // ping is on (even if the switch was turned off since) for one active tab.
 function recheckServer(alarm) {
@@ -553,6 +595,7 @@ async function runTick(alarm, options) {
     });
     await appendDiagnosticEntries(entries);
     await applyResults(results, at, { nudged: true, cookie: await readEraCookie(Date.now()) });
+    if (options.forcePing && !results.some(function (result) { return result.serverCalled; })) await rearmRecheck(at);
   } catch (error) {
     console.warn("eRA Keep Alive: nudge failed", error);
   }
@@ -683,17 +726,21 @@ async function handleEnabledChange(newValue) {
     await chrome.alarms.clear(RECHECK_ALARM_NAME);
   } else {
     var prior = await getState();
-    if (prior.sessionStatus !== "unknown") {
+    // A session eRA's server ended stays ended: the old tab's live cookie
+    // must not restart nudging. Only a real sign-in brings it back.
+    var serverEnded = typeof prior.serverEndedAt === "number";
+    var next = serverEnded ? "logged-out" : "unknown";
+    if (prior.sessionStatus !== next) {
       await appendDiagnosticEntries([{
         type: "status",
         at: Date.now(),
         from: prior.sessionStatus,
-        to: "unknown",
-        reason: "extension enabled",
+        to: next,
+        reason: serverEnded ? "extension enabled; eRA's server had ended the session" : "extension enabled",
         path: null
       }]);
     }
-    await setState({ sessionStatus: "unknown" });
+    await setState({ sessionStatus: next });
     await configureAlarm();
   }
   await updateBadge();

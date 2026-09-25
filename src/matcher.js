@@ -510,6 +510,13 @@
     if (entry.type === "server-refused") {
       return prefix + "server refused keep-alive — rechecking in 30 s (" + path + ")";
     }
+    if (entry.type === "server-recheck-retry") {
+      return prefix + "server recheck: no eRA tab to ping — trying again in 30 s (" +
+        String(entry.retry) + " of " + String(entry.of) + ")";
+    }
+    if (entry.type === "server-recheck-deferred") {
+      return prefix + "server recheck: still no eRA tab to ping — the next regular check will ask eRA's server";
+    }
     // Written by versions before 1.5.0.
     if (entry.type === "server-warning") {
       return prefix + "server rejected keep-alive (redirect) " + path + "; eRA timer still live, still nudging";

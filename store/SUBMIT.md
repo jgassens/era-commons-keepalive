@@ -13,11 +13,12 @@ for you in `store/listing.md`.
    ```sh
    bash scripts/package.sh
    ```
-   This creates `dist/session-keeper-era-1.4.3.zip`. That file is what you
-   upload — nothing else.
+   This creates `dist/session-keeper-era-<version>.zip`, where `<version>`
+   is the version in `manifest.json`; the script prints the exact path on
+   its "Built" line. That zip is what you upload — nothing else.
 
 3. **Start a new item.** In the developer dashboard, click **New item**,
-   then upload `dist/session-keeper-era-1.4.3.zip` when prompted.
+   then upload the zip that `scripts/package.sh` printed when prompted.
 
 4. **Take the screenshots and promo tile** if you have not already (see
    `store/screenshots/` and `store/promo-small-440x280.png` — they are
