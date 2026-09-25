@@ -1,8 +1,16 @@
 "use strict";
 
 var ALARM_NAME = "era-keep-alive";
+var PING_PERIOD_MINUTES = 4;
 var ERA_TAB_QUERY = { url: ["https://*.era.nih.gov/*"] };
-var DEFAULT_STATE = { enabled: true, sessionStatus: "unknown", lastSuccessfulPing: null, lastAutoClick: null };
+var DEFAULT_STATE = {
+  enabled: true,
+  sessionStatus: "unknown",
+  lastSuccessfulPingAt: null,
+  lastUserPageLoadAt: null,
+  lastAutoClick: null,
+  logoutRecords: []
+};
 
 function getState() {
   return chrome.storage.local.get(DEFAULT_STATE);
@@ -35,12 +43,30 @@ async function configureAlarm() {
     await chrome.alarms.clear(ALARM_NAME);
     return;
   }
-  await chrome.alarms.create(ALARM_NAME, { periodInMinutes: 10 });
+  await chrome.alarms.create(ALARM_NAME, { periodInMinutes: PING_PERIOD_MINUTES });
 }
 
 async function markLoggedOut() {
   var prior = await getState();
-  await setState({ sessionStatus: "logged-out" });
+  var detectedAt = Date.now();
+  var updates = { sessionStatus: "logged-out" };
+  if (prior.sessionStatus !== "logged-out") {
+    var lastSuccessfulPingAt = prior.lastSuccessfulPingAt;
+    var lastUserPageLoadAt = prior.lastUserPageLoadAt;
+    var minutesSinceLastPing = lastSuccessfulPingAt === null ? null :
+      Math.max(0, Math.round((detectedAt - lastSuccessfulPingAt) / 60000));
+    var minutesSinceLastPageLoad = lastUserPageLoadAt === null ? null :
+      Math.max(0, Math.round((detectedAt - lastUserPageLoadAt) / 60000));
+    var record = {
+      loggedOutDetectedAt: detectedAt,
+      lastSuccessfulPingAt: lastSuccessfulPingAt,
+      lastUserPageLoadAt: lastUserPageLoadAt,
+      minutesSinceLastPing: minutesSinceLastPing,
+      minutesSinceLastPageLoad: minutesSinceLastPageLoad
+    };
+    updates.logoutRecords = [record].concat(prior.logoutRecords || []).slice(0, 10);
+  }
+  await setState(updates);
   await chrome.alarms.clear(ALARM_NAME);
   await updateBadge();
   if (prior.sessionStatus !== "logged-out") {
@@ -66,7 +92,7 @@ async function pingOneEraTab() {
     if (result && result.loggedOut) {
       await markLoggedOut();
     } else if (result && result.success) {
-      await setState({ sessionStatus: "logged-in", lastSuccessfulPing: Date.now() });
+      await setState({ sessionStatus: "logged-in", lastSuccessfulPingAt: Date.now() });
       await updateBadge();
     }
   } catch (error) {
@@ -102,7 +128,10 @@ chrome.runtime.onMessage.addListener(function (message) {
     } else {
       getState().then(async function (state) {
         if (!state.enabled) return;
-        await setState({ sessionStatus: "logged-in" });
+        await setState({
+          sessionStatus: "logged-in",
+          lastUserPageLoadAt: message.at || Date.now()
+        });
         await configureAlarm();
         await updateBadge();
       });

@@ -22,6 +22,7 @@
     report({
       type: "era-page-ready",
       url: location.href,
+      at: Date.now(),
       isLoginPage: matcher.isLoginPage(location.href, document.body && document.body.innerText)
     });
   }

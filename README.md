@@ -1,6 +1,6 @@
 # eRA Commons Keep Alive
 
-This small Chrome extension helps keep **your own** NIH eRA Commons session active on **your own computer**. When it is on and an eRA Commons tab is open, it sends a harmless background request from that tab every 10 minutes. If eRA shows its session-timeout warning, the extension also tries to press that warning's safe “continue” button.
+This small Chrome extension helps keep **your own** NIH eRA Commons session active on **your own computer**. When it is on and an eRA Commons tab is open, it sends a harmless background request from that tab every 4 minutes. If eRA shows its session-timeout warning, the extension also tries to press that warning's safe “continue” button.
 
 It never reads, saves, fills, or sends passwords, two-factor codes, or any other credentials. It never attempts to log you in.
 
@@ -14,6 +14,10 @@ It never reads, saves, fills, or sends passwords, two-factor codes, or any other
 6. Open eRA Commons and sign in normally yourself.
 
 Click the extension's toolbar icon to turn it on or off and see its status. “Enabled — logged in” and a green **ON** badge mean the extension has seen an eRA page and is active. The popup records the most recent successful background request and automatic warning-button click. A red **!** badge and a Chrome notification mean eRA ended the session; sign in again normally.
+
+## Finding your real timeout
+
+After eRA sends you to a login page, open the extension popup and look at **Recent logouts**. Each entry says when the logout was detected, how long it had been since the extension's last successful check, and how long it had been since you last loaded an eRA page. Compare several entries to find the pattern. If a logout repeatedly follows a successful check by fewer than five minutes, the warning below it suggests that eRA may have a hard session limit or may not treat the background check as activity. The list keeps the 10 most recent detected logouts.
 
 ## Important limits
 

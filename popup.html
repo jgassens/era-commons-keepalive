@@ -12,6 +12,10 @@
       dl { margin: 16px 0 0; }
       dt { font-weight: 600; margin-top: 8px; }
       dd { margin: 1px 0 0; color: #4b5563; }
+      h2 { font-size: 14px; margin: 20px 0 6px; }
+      #logout-records { margin: 0; padding-left: 20px; color: #4b5563; }
+      #logout-records li { margin: 5px 0; }
+      #logout-records .logout-warning { color: #991b1b; }
     </style>
   </head>
   <body>
@@ -22,6 +26,8 @@
       <dt>Last successful ping</dt><dd id="last-ping">Never</dd>
       <dt>Last continued warning</dt><dd id="last-click">Never</dd>
     </dl>
+    <h2>Recent logouts</h2>
+    <ul id="logout-records"></ul>
     <script src="popup.js"></script>
   </body>
 </html>
