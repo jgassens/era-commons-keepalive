@@ -80,7 +80,9 @@
       .status-dot { flex: 0 0 auto; width: 9px; height: 9px; margin-top: 4px; border-radius: 50%; background: var(--neutral); }
       .status-block.tone-ok .status-dot { background: var(--ok); }
       .status-block.tone-bad .status-dot { background: var(--bad); }
+      .status-lines { flex: 1 1 auto; min-width: 0; }
       .status-text { margin: 0; font-size: 13px; line-height: 1.4; }
+      .status-subtext { margin: 4px 0 0; font-size: 11.5px; line-height: 1.4; color: var(--muted); }
 
       h2 {
         font-size: 11px;
@@ -134,7 +136,10 @@
 
       <div id="status-block" class="status-block">
         <span id="status-dot" class="status-dot"></span>
-        <p id="status" class="status-text">Loading…</p>
+        <div class="status-lines">
+          <p id="status" class="status-text">Loading…</p>
+          <p id="status-subtext" class="status-subtext" hidden></p>
+        </div>
       </div>
 
       <dl id="details" class="details">

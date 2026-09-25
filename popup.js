@@ -148,11 +148,17 @@ function currentServerEnd(state) {
 
 function renderStatus(state) {
   var serverEnd = currentServerEnd(state);
-  var status = matcher.popupStatus(state, serverEnd);
+  var pattern = matcher.sessionEndPattern(listFrom(state.logoutRecords));
+  var status = matcher.popupStatus(state, serverEnd, pattern);
   var block = document.getElementById("status-block");
   block.classList.remove("tone-ok", "tone-bad", "tone-neutral");
   block.classList.add("tone-" + status.tone);
   document.getElementById("status").textContent = status.text;
+  var subtext = document.getElementById("status-subtext");
+  if (subtext) {
+    subtext.hidden = !status.subtext;
+    subtext.textContent = status.subtext || "";
+  }
 }
 
 function renderDetails(state) {
@@ -165,11 +171,14 @@ function renderDetails(state) {
 }
 
 // Shown once two server-ended sessions lasted about as long as each other.
-function renderSessionPattern(records) {
+// While signed in, the same sentence already rides under the green status,
+// so this standalone line stays hidden then to avoid saying it twice.
+function renderSessionPattern(state, records) {
   var pattern = document.getElementById("session-pattern");
   var sentence = matcher.sessionEndPattern(records);
-  pattern.hidden = !sentence;
-  pattern.textContent = sentence || "";
+  var show = !!sentence && state.sessionStatus !== "logged-in";
+  pattern.hidden = !show;
+  pattern.textContent = show ? sentence : "";
 }
 
 function render(state) {
@@ -183,7 +192,7 @@ function render(state) {
   });
   section("status", function () { renderStatus(state); });
   section("details", function () { renderDetails(state); });
-  section("session-pattern", function () { renderSessionPattern(listFrom(state.logoutRecords)); });
+  section("session-pattern", function () { renderSessionPattern(state, listFrom(state.logoutRecords)); });
   section("logout-records", function () { renderLogoutRecords(listFrom(state.logoutRecords)); });
   section("diagnostic-log", function () { renderDiagnosticLog(listFrom(state.diagnosticLog)); });
 }

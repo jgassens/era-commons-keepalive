@@ -7,6 +7,7 @@ var path = require("node:path");
 var vm = require("node:vm");
 
 var ROOT = path.join(__dirname, "..");
+var matcher_ = require(path.join(ROOT, "src/matcher.js"));
 // Synthetic chrome.storage.local shaped like a real logout capture (v1.4.2).
 // It mixes v1.2.0 logout records and log entries with current ones. Some
 // scalars are garbled the way the leveldb extraction produces them (strings
@@ -46,7 +47,7 @@ function fakeElement(tag) {
 
 function renderPopup(state, options) {
   options = options || {};
-  var ids = ["enabled", "ping-server", "status", "status-block", "details",
+  var ids = ["enabled", "ping-server", "status", "status-subtext", "status-block", "details",
     "dt-signed-in", "signed-in", "dt-last-nudge", "last-nudge",
     "dt-server-checkin", "server-checkin", "dt-last-click", "last-click",
     "session-pattern", "logout-records", "diagnostic-log", "copy-log", "version", "open-tab"];
@@ -180,7 +181,7 @@ test("one bad section or record never blanks the rest of the popup", async funct
   var e = popup.elements;
   assert.equal(texts(e["diagnostic-log"]).length, 30);
   assert.ok(e["logout-records"].children.length >= 7);
-  assert.equal(e.status.textContent, "Keeping you signed in");
+  assert.equal(e.status.textContent, "Keeping you signed in — last check-in " + matcher_.clockTime(state.lastNudgeAt));
   assert.equal(e["status-block"].classList.contains("tone-ok"), true);
 
   // Not arrays at all: those two parts show their empty text, the rest renders.
@@ -334,16 +335,49 @@ test("the status line names a server end only while that end is the current one"
   assert.equal(notServer.elements.status.textContent, "Signed out — log in to eRA again.");
 });
 
-test("the 'eRA will log you out at' clause only appears when there is a future time to show", async function () {
+test("the 'last check-in' clause only appears when there has been a nudge", async function () {
   var at = Date.UTC(2026, 8, 25, 16, 45);
-  var withTime = renderPopup({ sessionStatus: "logged-in", eraLogoutAt: at });
+  var withNudge = renderPopup({ sessionStatus: "logged-in", lastNudgeAt: at });
   await settle();
-  assert.match(withTime.elements.status.textContent, /unless you stay active$/);
+  assert.equal(withNudge.elements.status.textContent, "Keeping you signed in — last check-in " + withNudge.context.EraKeepAlive.clockTime(at));
 
-  var withoutTime = renderPopup({ sessionStatus: "logged-in", eraLogoutAt: null });
+  var withoutNudge = renderPopup({ sessionStatus: "logged-in", lastNudgeAt: null });
   await settle();
-  assert.equal(withoutTime.elements.status.textContent, "Keeping you signed in");
-  assert.doesNotMatch(withoutTime.elements.status.textContent, /Never/);
+  assert.equal(withoutNudge.elements.status.textContent, "Keeping you signed in");
+  assert.doesNotMatch(withoutNudge.elements.status.textContent, /Never/);
+});
+
+test("a server-end pattern sentence shows as a muted line under the green status", async function () {
+  var start = Date.UTC(2026, 8, 25, 17, 50);
+  function serverEnd(minutes, dayOffset) {
+    var startedAt = start - dayOffset * 86400000;
+    return {
+      loggedOutDetectedAt: startedAt + minutes * 60000,
+      reason: matcher_.SERVER_END_REASON,
+      serverEnded: true,
+      sessionStartedAt: startedAt,
+      estimatedEndAt: startedAt + minutes * 60000
+    };
+  }
+  var withPattern = renderPopup({
+    sessionStatus: "logged-in",
+    lastNudgeAt: start,
+    logoutRecords: [serverEnd(128, 0), serverEnd(132, 1)]
+  });
+  await settle();
+  assert.equal(withPattern.elements["status-block"].classList.contains("tone-ok"), true);
+  assert.equal(withPattern.elements["status-subtext"].hidden, false);
+  assert.equal(withPattern.elements["status-subtext"].textContent,
+    "eRA seems to end sessions about 2 h 10 min after sign-in (seen 2 times).");
+  // The standalone pattern line stays hidden while signed in — the same
+  // sentence is already the status subtext, so it is not said twice.
+  assert.equal(withPattern.elements["session-pattern"].hidden, true);
+
+  // No pattern yet (fewer than two server-ended records): the line stays hidden.
+  var withoutPattern = renderPopup({ sessionStatus: "logged-in", lastNudgeAt: start, logoutRecords: [serverEnd(128, 0)] });
+  await settle();
+  assert.equal(withoutPattern.elements["status-subtext"].hidden, true);
+  assert.equal(withoutPattern.elements["status-subtext"].textContent, "");
 });
 
 test("the server check-in detail row is off, accepted or refused, never a bare 'Never'", async function () {

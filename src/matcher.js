@@ -385,19 +385,26 @@
 
   // The status pill's tone and sentence. serverEndRecord is the current
   // server-ended record (see the popup's own currentServerEnd), or null.
-  function popupStatus(state, serverEndRecord) {
+  // patternSentence is the current eRA-session-limit sentence (see
+  // sessionEndPattern), or null; when given, it rides along as a muted
+  // second line under the green "signed in" status.
+  function popupStatus(state, serverEndRecord, patternSentence) {
     state = state && typeof state === "object" ? state : {};
     if (state.enabled === false) return { tone: "neutral", text: "Turned off" };
     if (state.sessionStatus === "idle") {
       return { tone: "neutral", text: "No eRA tab open — not keeping the session alive" };
     }
     if (state.sessionStatus === "logged-in") {
-      var logoutAt = isFiniteNumber(state.eraLogoutAt) ? clockTime(state.eraLogoutAt) : null;
-      return {
+      // The eRA page timer is pushed forward by the extension every 4
+      // minutes, so its "log you out at" time is not a real deadline; the
+      // last nudge is the honest thing to show instead.
+      var lastCheckIn = isFiniteNumber(state.lastNudgeAt) ? clockTime(state.lastNudgeAt) : null;
+      var result = {
         tone: "ok",
-        text: "Keeping you signed in" +
-          (logoutAt ? " — eRA will log you out at " + logoutAt + " unless you stay active" : "")
+        text: "Keeping you signed in" + (lastCheckIn ? " — last check-in " + lastCheckIn : "")
       };
+      if (patternSentence) result.subtext = patternSentence;
+      return result;
     }
     if (state.sessionStatus === "logged-out") {
       var text = "Signed out — log in to eRA again.";

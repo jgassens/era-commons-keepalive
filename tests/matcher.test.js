@@ -422,10 +422,20 @@ test("popupStatus gives the pill's tone and sentence for each state", function (
     { tone: "neutral", text: "No eRA tab open — not keeping the session alive" });
   assert.deepEqual(matcher.popupStatus({ enabled: true, sessionStatus: "logged-in" }, null),
     { tone: "ok", text: "Keeping you signed in" });
-  var logoutAt = Date.UTC(2026, 8, 25, 16, 45);
-  assert.deepEqual(matcher.popupStatus({ enabled: true, sessionStatus: "logged-in", eraLogoutAt: logoutAt }, null),
-    { tone: "ok", text: "Keeping you signed in — eRA will log you out at " + matcher.clockTime(logoutAt) + " unless you stay active" });
-  assert.deepEqual(matcher.popupStatus({ enabled: true, sessionStatus: "logged-out" }, null),
+  var lastNudgeAt = Date.UTC(2026, 8, 25, 16, 45);
+  assert.deepEqual(matcher.popupStatus({ enabled: true, sessionStatus: "logged-in", lastNudgeAt: lastNudgeAt }, null),
+    { tone: "ok", text: "Keeping you signed in — last check-in " + matcher.clockTime(lastNudgeAt) });
+  // A server-end pattern sentence rides along as a subtext line, only for
+  // the green "signed in" status.
+  assert.deepEqual(
+    matcher.popupStatus({ enabled: true, sessionStatus: "logged-in", lastNudgeAt: lastNudgeAt }, null, "eRA seems to end sessions about 2 h after sign-in (seen 2 times)."),
+    {
+      tone: "ok",
+      text: "Keeping you signed in — last check-in " + matcher.clockTime(lastNudgeAt),
+      subtext: "eRA seems to end sessions about 2 h after sign-in (seen 2 times)."
+    }
+  );
+  assert.deepEqual(matcher.popupStatus({ enabled: true, sessionStatus: "logged-out" }, null, "eRA seems to end sessions about 2 h after sign-in (seen 2 times)."),
     { tone: "bad", text: "Signed out — log in to eRA again." });
   assert.deepEqual(matcher.popupStatus({ enabled: true, sessionStatus: "unknown" }, null),
     { tone: "neutral", text: "Status unknown" });
