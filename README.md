@@ -10,6 +10,8 @@ When eRA logs you out — its own timer ran out, or you pressed **Logout** — e
 
 It never reads, saves, fills, or sends passwords, two-factor codes, or any other credentials. It never tries to log you in.
 
+Privacy policy: https://jgassens.github.io/era-commons-keepalive/privacy-policy.html
+
 ## Install it in Chrome
 
 1. Download or open this extension folder on your computer.

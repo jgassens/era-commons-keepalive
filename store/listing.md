@@ -2,8 +2,6 @@
 
 Everything below is written to be pasted directly into the fields of the
 Chrome Web Store developer dashboard (chrome.google.com/webstore/devconsole).
-Nothing here needs editing except the privacy policy URL placeholder near
-the bottom, once that page is hosted somewhere.
 
 ## Item name
 
@@ -195,19 +193,9 @@ data is read, stored, or handled anywhere in the extension.
 ## Privacy policy URL
 
 ```
-<PASTE THE HOSTED URL OF store/privacy-policy.html HERE>
+https://jgassens.github.io/era-commons-keepalive/privacy-policy.html
 ```
 
-`store/privacy-policy.html` is a ready-to-host, self-contained page.
-Two easy ways to put it at a public URL:
-
-1. **GitHub Pages** — push this repo (or just that one file) to a GitHub
-   repository, turn on Pages for it in the repo's Settings → Pages, and
-   use the `https://<username>.github.io/<repo>/privacy-policy.html` URL
-   it gives you.
-2. **Google Sites** — create a free Google Site, add the text from
-   `store/privacy-policy.html` as a page (Google Sites' editor accepts
-   embedded HTML/plain text), publish it, and use that page's URL.
-
-Paste whichever URL you end up with into the dashboard's **Privacy policy**
-field and into the placeholder above for your own records.
+This is the GitHub Pages URL for `docs/privacy-policy.html`, hosted from
+this repository's `main` branch `/docs` folder. Paste this URL into the
+dashboard's **Privacy policy** field.

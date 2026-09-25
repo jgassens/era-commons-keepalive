@@ -34,9 +34,9 @@ for you in `store/listing.md`.
    - Language
 
 6. **Set up the Privacy tab:**
-   - Host `store/privacy-policy.html` somewhere public (GitHub Pages or a
-     Google Site both work — `store/listing.md` has step-by-step notes),
-     then paste that page's URL into the **Privacy policy URL** field.
+   - Paste `https://jgassens.github.io/era-commons-keepalive/privacy-policy.html`
+     (the GitHub Pages URL for `docs/privacy-policy.html`) into the
+     **Privacy policy URL** field.
    - Under **Permission justifications**, paste in the paragraph for each
      permission from `store/listing.md` (storage, alarms, notifications,
      scripting, cookies, and the `https://*.era.nih.gov/*` host permission).

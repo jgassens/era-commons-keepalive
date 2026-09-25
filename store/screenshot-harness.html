@@ -111,18 +111,7 @@
         eraLogoutAt: now + 45 * 60 * 1000,
         lastAutoClick: null,
         serverWarning: null,
-        logoutRecords: [
-          {
-            loggedOutDetectedAt: now - 5 * 60 * 60 * 1000,
-            reason: "eRA timer cookie expired",
-            minutesSinceSignIn: 138.4,
-            minutesSinceLastNudge: 46.1,
-            minutesSinceLastPageLoad: 51.7,
-            minutesLeftAtLastNudge: 44.8,
-            pingServer: false,
-            lastServerPing: "server not called (ping off)"
-          }
-        ],
+        logoutRecords: [],
         diagnosticLog: [
           { at: now - 20 * 60 * 1000, type: "page-load", path: "/commons/public/index.jsp", managerPresent: true, minsLeft: 45.0 },
           { at: now - 16 * 60 * 1000, type: "nudge", path: "/commonsplus/home.era", managerPresent: true, minsLeftBefore: 41.0, minsLeftAfter: 45.0, pingServer: false },
