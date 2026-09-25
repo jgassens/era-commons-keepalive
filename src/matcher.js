@@ -112,7 +112,7 @@
   function isEraLogoutUrl(url) {
     try {
       var parsed = new URL(String(url || ""));
-      return parsed.pathname.indexOf("/authi/public/do") !== -1 &&
+      return /\/authi\/public\/do$/i.test(parsed.pathname) &&
         String(parsed.searchParams.get("action") || "").toLowerCase() === "logout";
     } catch (error) {
       return false;
@@ -124,7 +124,7 @@
       var parsed = new URL(String(url || ""));
       var hostname = parsed.hostname.toLowerCase();
       return hostname === "login.gov" || /\.login\.gov$/.test(hostname) ||
-        /(?:^|\/)(?:login|signin|sign-in|logout|logged-out|sessiontimeout|timeout)/i.test(parsed.pathname);
+        /\/public\/login\.era$/i.test(parsed.pathname) || isEraLogoutUrl(parsed.href);
     } catch (error) {
       return false;
     }
@@ -136,6 +136,94 @@
     return isLoginUrl(url) || (loggedOutText && !hasLogoutControl);
   }
 
+  function isIgnoredEraUrl(url) {
+    try {
+      var parsed = new URL(String(url || ""));
+      return parsed.hostname.toLowerCase() === "www.era.nih.gov" ||
+        /(?:^|\/)erahelp(?:\/|$)/i.test(parsed.pathname);
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function safePath(url) {
+    try {
+      return new URL(String(url || "")).pathname || "/";
+    } catch (error) {
+      var path = String(url || "").split(/[?#]/)[0];
+      return path.charAt(0) === "/" ? path : "/";
+    }
+  }
+
+  function buildKeepSessionAliveUrl(baseUrl, currentAppName, pageUrl) {
+    try {
+      var page = new URL(String(pageUrl || ""));
+      var base = String(baseUrl || "");
+      var appName = String(currentAppName || "");
+      if (!base) base = page.origin + (appName.charAt(0) === "/" ? "" : "/");
+      var target = new URL(base + appName + "/jsp/keepSessionAlive.jsp", page.href);
+      if (target.protocol !== "https:" || !target.hostname.toLowerCase().endsWith(".era.nih.gov")) return null;
+      return target.href;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function deriveSessionStatus(results) {
+    var relevant = (results || []).filter(function (result) {
+      return result && !result.ignored;
+    });
+    if (relevant.some(function (result) {
+      return !result.isLoginPage && !result.serverRedirectedToLogin && result.managerPresent &&
+        ((typeof result.minsLeftAfter === "number" && result.minsLeftAfter > 0) ||
+          (typeof result.minsLeftBefore === "number" && result.minsLeftBefore > 0));
+    })) return "logged-in";
+    if (relevant.length && relevant.every(function (result) {
+      return result.isLoginPage || result.serverRedirectedToLogin ||
+        (typeof result.minsLeftBefore === "number" && result.minsLeftBefore <= 0);
+    })) return "logged-out";
+    return "unknown";
+  }
+
+  function oneDecimal(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value.toFixed(1) : null;
+  }
+
+  function shortTime(value) {
+    var date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return "--:--";
+    return String(date.getHours()).padStart(2, "0") + ":" + String(date.getMinutes()).padStart(2, "0");
+  }
+
+  function formatLogLine(entry) {
+    entry = entry || {};
+    var prefix = shortTime(entry.at) + " ";
+    var path = safePath(entry.path || "/");
+    if (entry.type === "nudge") {
+      var detail;
+      if (!entry.managerPresent) detail = "timeout manager not present";
+      else if (entry.minsLeftBefore === null || typeof entry.minsLeftBefore === "undefined") detail = "timer missing";
+      else if (entry.minsLeftBefore <= 0) detail = "timer expired (" + oneDecimal(entry.minsLeftBefore) + " min)";
+      else detail = "timer " + oneDecimal(entry.minsLeftBefore) + " -> " + oneDecimal(entry.minsLeftAfter) + " min";
+      var server = entry.serverStatus === null || typeof entry.serverStatus === "undefined" ?
+        "server not called" : "server " + entry.serverStatus;
+      if (entry.serverRedirectedToLogin) server += " (login redirect)";
+      return prefix + "nudge " + path + ": " + detail + ", " + server;
+    }
+    if (entry.type === "page-load") {
+      var pageDetail = !entry.managerPresent ? "timeout manager not present" :
+        entry.minsLeft === null || typeof entry.minsLeft === "undefined" ? "timer missing" :
+          "timer " + oneDecimal(entry.minsLeft) + " min";
+      return prefix + "page load " + path + ": " + pageDetail;
+    }
+    if (entry.type === "status") {
+      return prefix + "status " + entry.from + " -> " + entry.to + ": " +
+        String(entry.reason || "status changed") + (entry.path ? " (" + path + ")" : "");
+    }
+    if (entry.type === "auto-click") return prefix + "continued timeout warning " + path;
+    return prefix + String(entry.type || "event") + " " + path;
+  }
+
   return {
     textOf: textOf,
     isTimeoutWarningText: isTimeoutWarningText,
@@ -145,6 +233,11 @@
     parseEraLogoutAt: parseEraLogoutAt,
     isEraLogoutUrl: isEraLogoutUrl,
     isLoginUrl: isLoginUrl,
-    isLoginPage: isLoginPage
+    isLoginPage: isLoginPage,
+    isIgnoredEraUrl: isIgnoredEraUrl,
+    safePath: safePath,
+    buildKeepSessionAliveUrl: buildKeepSessionAliveUrl,
+    deriveSessionStatus: deriveSessionStatus,
+    formatLogLine: formatLogLine
   };
 });

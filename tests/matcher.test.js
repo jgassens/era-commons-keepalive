@@ -48,36 +48,18 @@ test("never selects logout or sign-out actions in a timeout dialog", function ()
 
 test("detects login-page redirects and strong logged-out page text", function () {
   assert.equal(matcher.isLoginPage("https://secure.login.gov/?state=x", ""), true);
-  assert.equal(matcher.isLoginPage("https://public.era.nih.gov/commons/login-type", ""), true);
+  assert.equal(matcher.isLoginPage("https://public.era.nih.gov/commonsplus/public/login.era", ""), true);
   assert.equal(matcher.isLoginPage("https://public.era.nih.gov/commons/", "You have been logged out."), true);
   assert.equal(matcher.isLoginPage("https://public.era.nih.gov/commons/", "Your session has expired", false), true);
   assert.equal(matcher.isLoginPage("https://public.era.nih.gov/commons/home", "Welcome to eRA Commons"), false);
 });
 
-test("detects login-related pathname segments and login.gov hosts", function () {
-  [
-    "https://public.era.nih.gov/commons/public/login.do",
-    "https://public.era.nih.gov/login",
-    "https://public.era.nih.gov/signin?x=1",
-    "https://public.era.nih.gov/era/Logout.jsp",
-    "https://public.era.nih.gov/account/sign-in-now",
-    "https://public.era.nih.gov/sessiontimeout-warning",
-    "https://public.era.nih.gov/timeout-page",
-    "https://login.gov/",
-    "https://secure.login.gov/"
-  ].forEach(function (url) {
-    assert.equal(matcher.isLoginUrl(url), true, url);
-  });
-});
-
-test("only checks pathname segments, not unrelated paths or query strings", function () {
-  [
-    "/commons/",
-    "/commons/personProfile",
-    "/commons/help?topic=login"
-  ].forEach(function (url) {
-    assert.equal(matcher.isLoginUrl("https://public.era.nih.gov" + url), false, url);
-  });
+test("recognizes only the explicit login and logout URLs", function () {
+  assert.equal(matcher.isLoginUrl("https://www.era.nih.gov/erahelp/commons/commons/access/login.htm"), false);
+  assert.equal(matcher.isLoginUrl("https://public.era.nih.gov/commonsplus/public/login.era"), true);
+  assert.equal(matcher.isLoginUrl("https://secure.login.gov/"), true);
+  assert.equal(matcher.isLoginUrl("https://public.era.nih.gov/commons/authi/public/do?action=logout"), true);
+  assert.equal(matcher.isLoginUrl("https://public.era.nih.gov/commonsplus/home.era"), false);
 });
 
 test("does not treat Login.gov text on a page with a logout control as logged out", function () {
@@ -140,4 +122,65 @@ test("parses the eRA timeout cookie among other cookies", function () {
 test("recognizes eRA's explicit logout URL", function () {
   assert.equal(matcher.isEraLogoutUrl("https://public.era.nih.gov/commons/authi/public/do?action=logout"), true);
   assert.equal(matcher.isEraLogoutUrl("https://public.era.nih.gov/commons/authi/public/do?action=continue"), false);
+});
+
+test("builds eRA's keep-session-alive URL and rejects other origins", function () {
+  assert.equal(
+    matcher.buildKeepSessionAliveUrl(
+      "https://public.era.nih.gov",
+      "/commonsplus",
+      "https://public.era.nih.gov/commonsplus/home.era"
+    ),
+    "https://public.era.nih.gov/commonsplus/jsp/keepSessionAlive.jsp"
+  );
+  assert.equal(
+    matcher.buildKeepSessionAliveUrl("", "/commonsplus", "https://public.era.nih.gov/commonsplus/home.era"),
+    "https://public.era.nih.gov/commonsplus/jsp/keepSessionAlive.jsp"
+  );
+  assert.equal(
+    matcher.buildKeepSessionAliveUrl("", "commonsplus", "https://public.era.nih.gov/commonsplus/home.era"),
+    "https://public.era.nih.gov/commonsplus/jsp/keepSessionAlive.jsp"
+  );
+  assert.equal(
+    matcher.buildKeepSessionAliveUrl("/", "commonsplus", "https://public.era.nih.gov/commonsplus/home.era"),
+    "https://public.era.nih.gov/commonsplus/jsp/keepSessionAlive.jsp"
+  );
+  assert.equal(
+    matcher.buildKeepSessionAliveUrl("https://example.com/", "commonsplus", "https://public.era.nih.gov/home"),
+    null
+  );
+});
+
+test("derives session status across all relevant tab results", function () {
+  var active = { managerPresent: true, minsLeftBefore: 41, minsLeftAfter: 45 };
+  var expired = { managerPresent: true, minsLeftBefore: -1, minsLeftAfter: -1 };
+  var login = { managerPresent: false, minsLeftBefore: null, isLoginPage: true };
+  var unknown = { managerPresent: false, minsLeftBefore: null };
+  assert.equal(matcher.deriveSessionStatus([expired, active]), "logged-in");
+  assert.equal(matcher.deriveSessionStatus([expired, login]), "logged-out");
+  assert.equal(matcher.deriveSessionStatus([{ serverRedirectedToLogin: true }, login]), "logged-out");
+  assert.equal(matcher.deriveSessionStatus([{ ...active, serverRedirectedToLogin: true }]), "logged-out");
+  assert.equal(matcher.deriveSessionStatus([login, unknown]), "unknown");
+  assert.equal(matcher.deriveSessionStatus([]), "unknown");
+});
+
+test("formats a nudge log line without query strings", function () {
+  var line = matcher.formatLogLine({
+    type: "nudge",
+    at: new Date(2026, 0, 1, 10, 4).getTime(),
+    path: "/commonsplus/home.era?secret=value",
+    managerPresent: true,
+    minsLeftBefore: 41.24,
+    minsLeftAfter: 44.96,
+    serverStatus: 200,
+    serverRedirectedToLogin: false
+  });
+  assert.equal(line, "10:04 nudge /commonsplus/home.era: timer 41.2 -> 45.0 min, server 200");
+  assert.equal(line.includes("secret"), false);
+});
+
+test("identifies pages excluded from status and page-load tracking", function () {
+  assert.equal(matcher.isIgnoredEraUrl("https://www.era.nih.gov/news"), true);
+  assert.equal(matcher.isIgnoredEraUrl("https://public.era.nih.gov/erahelp/commons/index.htm"), true);
+  assert.equal(matcher.isIgnoredEraUrl("https://public.era.nih.gov/commonsplus/home.era"), false);
 });

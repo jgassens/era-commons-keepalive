@@ -21,78 +21,81 @@
     });
   }
 
-  function isWarningModalVisible() {
-    return [
-      document.querySelector("#sessionTimeoutModalDialog"),
-      document.querySelector("#sessionTimeoutModalDialogNative")
-    ].some(isElementVisible);
-  }
-
   function lookForWarning() {
     var button = matcher.findTimeoutContinueButton(document, isElementVisible);
     var now = Date.now();
     if (!button || now - (lastClickAtByButton.get(button) || 0) < CLICK_COOLDOWN_MS) return;
     lastClickAtByButton.set(button, now);
     button.click();
-    report({ type: "auto-click", at: now });
+    report({ type: "auto-click", at: now, path: location.pathname });
   }
 
-  function pageSignals(documentLike) {
-    var body = documentLike && documentLike.body;
-    if (!body) return { visibleText: "", hasLogoutControl: false };
-
-    var textBody = body.cloneNode(true);
-    Array.prototype.forEach.call(textBody.querySelectorAll("script, style, noscript"), function (node) {
-      node.remove();
-    });
-
-    var hasLogoutControl = Array.prototype.some.call(documentLike.querySelectorAll("a, button"), function (control) {
-      var text = String(control.textContent || "");
-      var href = String(control.getAttribute("href") || "");
-      return /\b(?:logout|log\s+out|sign\s+out)\b/i.test(text) ||
-        /\b(?:logout|log\s+out|sign\s+out)\b/i.test(href);
-    });
-
-    return {
-      visibleText: textBody.textContent || "",
-      hasLogoutControl: hasLogoutControl
-    };
+  function minutesLeft(logoutAt, now) {
+    return typeof logoutAt === "number" ? (logoutAt - now) / 60000 : null;
   }
 
-  function isLoggedOutDocument(url, documentLike) {
-    if (matcher.isEraLogoutUrl(url)) return true;
-    var signals = pageSignals(documentLike);
-    return matcher.isLoginPage(url, signals.visibleText, signals.hasLogoutControl);
+  function managerControl() {
+    return document.querySelector("#session-timeout-control");
   }
 
   function reportPageState() {
+    var control = managerControl();
+    var now = Date.now();
     report({
       type: "era-page-ready",
-      url: location.href,
-      at: Date.now(),
-      isLoginPage: isLoggedOutDocument(location.href, document)
+      at: now,
+      path: location.pathname,
+      ignored: matcher.isIgnoredEraUrl(location.href),
+      isLoginPage: matcher.isLoginUrl(location.href),
+      managerPresent: !!control,
+      minsLeft: minutesLeft(matcher.parseEraLogoutAt(document.cookie), now)
     });
   }
 
   chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     if (!message || message.type !== "nudge-activity") return;
-    if (isLoggedOutDocument(location.href, document)) {
-      sendResponse({ nudged: false, logoutAt: null, loggedOut: true });
-      return;
-    }
-    if (!document.querySelector("#session-timeout-control") || isWarningModalVisible()) {
-      sendResponse({ nudged: false, logoutAt: null, loggedOut: false });
+    var control = managerControl();
+    var now = Date.now();
+    var logoutAtBefore = matcher.parseEraLogoutAt(document.cookie);
+    var result = {
+      path: location.pathname,
+      managerPresent: !!control,
+      minsLeftBefore: minutesLeft(logoutAtBefore, now),
+      minsLeftAfter: minutesLeft(logoutAtBefore, now),
+      serverStatus: null,
+      serverRedirectedToLogin: false
+    };
+    if (!control || logoutAtBefore === null || logoutAtBefore <= now) {
+      sendResponse(result);
       return;
     }
 
     // eRA's own document-level jQuery handler treats this like normal activity
     // and renews the timeout cookie. It does not move the user's viewport.
     document.dispatchEvent(new Event("scroll"));
-    sendResponse({
-      nudged: true,
-      logoutAt: matcher.parseEraLogoutAt(document.cookie),
-      loggedOut: false
+    result.minsLeftAfter = minutesLeft(matcher.parseEraLogoutAt(document.cookie), Date.now());
+
+    var keepAliveUrl = matcher.buildKeepSessionAliveUrl(
+      control.getAttribute("data-base-url"),
+      control.getAttribute("data-current-app-name"),
+      location.href
+    );
+    if (!keepAliveUrl) {
+      sendResponse(result);
+      return;
+    }
+    fetch(keepAliveUrl, {
+      method: "GET",
+      credentials: "include",
+      cache: "no-store"
+    }).then(function (response) {
+      result.serverStatus = response.status;
+      result.serverRedirectedToLogin = matcher.isLoginUrl(response.url);
+      sendResponse(result);
+    }).catch(function () {
+      sendResponse(result);
     });
+    return true;
   });
 
   var observer = new MutationObserver(lookForWarning);
