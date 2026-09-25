@@ -6,9 +6,15 @@
     <title>Session Keeper for eRA Commons (unofficial)</title>
     <style>
       /* A fixed width: left to itself Chrome shrinks the popup to its narrowest
-         fit, and long logout records then push the log far out of view. */
-      body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; width: 360px; color: #1f2937; }
+         fit, and long logout records then push the log far out of view. The
+         auto side margins do nothing inside the popup (its window is sized to
+         fit the body exactly) but center this same page when it is opened as
+         a full browser tab instead. */
+      html { background: #eef2f6; }
+      body { font: 14px/1.4 system-ui, sans-serif; margin: 16px auto; width: 360px; color: #1f2937; }
       h1 { font-size: 16px; margin: 0 0 14px; }
+      #open-tab { display: block; text-align: right; font-size: 12px; margin: 0 0 10px; color: #2563eb; text-decoration: none; }
+      #open-tab:hover { text-decoration: underline; }
       label { display: flex; align-items: center; gap: 8px; font-weight: 600; }
       label + label { margin-top: 8px; font-weight: 400; }
       input { width: 18px; height: 18px; }
@@ -29,6 +35,7 @@
     </style>
   </head>
   <body>
+    <a id="open-tab" href="popup.html" target="_blank">Open in a tab ↗</a>
     <h1>Session Keeper for eRA Commons <small>(unofficial, not affiliated with NIH/eRA)</small></h1>
     <label><input id="enabled" type="checkbox"> Keep session active</label>
     <label><input id="ping-server" type="checkbox"> Also ping eRA's server</label>

@@ -27,7 +27,7 @@ When the extension is installed, updated, or Chrome starts, it adds itself to eR
 
 ## The popup
 
-Click the extension's toolbar icon to see its status.
+Click the extension's toolbar icon to see its status. If the popup feels cramped, the **Open in a tab** link at the top opens the same page as a full tab; clicking the "session ended" notification does the same.
 
 - **Keep session active** turns the whole extension on or off. While it is off, nothing is scrolled, clicked, or pinged, and nothing is logged.
 - **Also ping eRA's server** is **on by default** and can be switched off. See below.

@@ -160,6 +160,12 @@ function load() {
 }
 
 load();
+document.getElementById("open-tab").addEventListener("click", function (event) {
+  event.preventDefault();
+  chrome.tabs.create({ url: chrome.runtime.getURL("popup.html") }).catch(function (error) {
+    console.warn("eRA Keep Alive: could not open a tab", error);
+  });
+});
 enabled.addEventListener("change", function () {
   chrome.storage.local.set({ enabled: enabled.checked });
 });

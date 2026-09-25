@@ -37,10 +37,11 @@ function fakeElement(tag) {
 function renderPopup(state, options) {
   options = options || {};
   var ids = ["enabled", "ping-server", "status", "signed-in", "last-nudge", "logout-at", "last-click",
-    "server-warning", "logout-records", "diagnostic-log", "copy-log", "version"];
+    "server-warning", "logout-records", "diagnostic-log", "copy-log", "version", "open-tab"];
   var elements = {};
   ids.forEach(function (id) { elements[id] = fakeElement(id === "logout-records" ? "ul" : "div"); });
   var warnings = [];
+  var tabsCreated = [];
   var context = {
     console: { warn: function () { warnings.push(Array.from(arguments)); }, log: function () {}, error: function () {} },
     document: {
@@ -49,8 +50,20 @@ function renderPopup(state, options) {
     },
     navigator: { clipboard: { writeText: async function (text) { context.copied = text; } } },
     window: { setTimeout: function () {} },
+    tabsCreated: tabsCreated,
     chrome: {
-      runtime: { getManifest: function () { return { version: "1.4.3" }; } },
+      runtime: {
+        getManifest: function () { return { version: "1.4.3" }; },
+        getURL: function (path) { return "chrome-extension://fake-extension-id/" + path; }
+      },
+      tabs: {
+        // Rebuilt as a plain object of this realm: the vm context has its own
+        // Object, so a literal built inside it fails deepStrictEqual here.
+        create: async function (details) {
+          if (options.tabsCreateFails) throw new Error("could not create tab");
+          tabsCreated.push({ url: details.url });
+        }
+      },
       storage: {
         local: {
           get: async function (defaults) {
@@ -182,6 +195,16 @@ test("the ping switch shows on when nothing is stored, and a failed read still r
   await settle();
   assert.equal(failed.elements.status.textContent, "Enabled — status unknown");
   assert.equal(failed.elements["diagnostic-log"].textContent, "No diagnostic entries yet.");
+});
+
+test("the 'open in a tab' link opens popup.html in a tab and does not navigate the popup", async function () {
+  var popup = renderPopup(plausibleRealState());
+  await settle();
+  var prevented = false;
+  await popup.elements["open-tab"].listeners.click({ preventDefault: function () { prevented = true; } });
+  await settle();
+  assert.equal(prevented, true);
+  assert.deepEqual(popup.context.tabsCreated, [{ url: "chrome-extension://fake-extension-id/popup.html" }]);
 });
 
 test("a server-ended record gets the keep-the-ping-on note in the popup", async function () {

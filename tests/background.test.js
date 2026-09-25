@@ -41,11 +41,16 @@ function makeFake(options) {
   var store = Object.assign({}, clone(options.storage || {}));
   var alarms = {};
   var tabs = options.tabs || [];
-  var calls = { notifications: [], executeScript: [], badgeText: [], sent: [] };
-  var failures = { get: 0, setDiagnosticLog: 0, cookies: 0 };
+  var calls = { notifications: [], executeScript: [], badgeText: [], sent: [], tabsCreated: [], notificationsCleared: [] };
+  var failures = { get: 0, setDiagnosticLog: 0, cookies: 0, action: options.actionFailures || 0 };
   var onChanged = listenerSlot();
   var onCookieChanged = listenerSlot();
+  var onNotificationClicked = listenerSlot();
   var jar = [];
+  // background.js's own setTimeout calls land here instead of firing for
+  // real; a test fires one by calling its .fn(). Not the queue microtasks
+  // Promise/async already run on: those still run for real.
+  var timers = [];
 
   function eraCookie(value) {
     return { name: "ERA_SESSION_TIMEOUT_COOKIE", value: String(value), domain: ".era.nih.gov", path: "/" };
@@ -157,13 +162,27 @@ function makeFake(options) {
         var tab = tabs.find(function (item) { return item.id === tabId; });
         if (!tab || tab.page.unreachable) throw new Error("Could not establish connection. Receiving end does not exist.");
         return reply(tab, message);
-      }
+      },
+      // Rebuilt as a plain object of this realm: the vm context has its own
+      // Object, so a literal built inside it fails deepStrictEqual here.
+      create: async function (details) { calls.tabsCreated.push({ url: details.url }); return { id: 999, url: details.url }; }
     },
     action: {
-      setBadgeText: async function (details) { calls.badgeText.push(details.text); },
-      setBadgeBackgroundColor: async function () {}
+      // Mirrors the real "No SW" error Chrome throws when chrome.action is
+      // called before the service worker has finished starting up.
+      setBadgeText: async function (details) {
+        if (failures.action > 0) { failures.action -= 1; throw new Error("No SW"); }
+        calls.badgeText.push(details.text);
+      },
+      setBadgeBackgroundColor: async function () {
+        if (failures.action > 0) { failures.action -= 1; throw new Error("No SW"); }
+      }
     },
-    notifications: { create: async function (id, details) { calls.notifications.push(details); } },
+    notifications: {
+      create: async function (id, details) { calls.notifications.push(details); },
+      clear: async function (id) { calls.notificationsCleared.push(id); },
+      onClicked: onNotificationClicked
+    },
     cookies: {
       getAll: async function (details) {
         if (failures.cookies > 0) {
@@ -184,7 +203,12 @@ function makeFake(options) {
         if (tab && tab.page.unreachable) throw new Error("Cannot access contents of the page");
       }
     },
-    runtime: { onMessage: listenerSlot(), onInstalled: listenerSlot(), onStartup: listenerSlot() }
+    runtime: {
+      onMessage: listenerSlot(),
+      onInstalled: listenerSlot(),
+      onStartup: listenerSlot(),
+      getURL: function (path) { return "chrome-extension://fake-extension-id/" + path; }
+    }
   };
 
   var context = {
@@ -193,6 +217,13 @@ function makeFake(options) {
     console: { warn: function () {}, log: function () {}, error: function () {} },
     importScripts: function (file) {
       vm.runInContext(fs.readFileSync(path.join(ROOT, file), "utf8"), context, { filename: file });
+    },
+    // Real timers would make tests wait out the 1s badge retry; a test fires
+    // one deliberately instead by calling the entry's .fn().
+    setTimeout: function (fn, delay) {
+      var entry = { fn: fn, delay: delay };
+      timers.push(entry);
+      return timers.length;
     }
   };
   vm.createContext(context);
@@ -200,7 +231,8 @@ function makeFake(options) {
 
   return {
     bg: context, chrome: chrome, store: store, alarms: alarms, tabs: tabs, calls: calls, failures: failures,
-    jar: jar, setEraCookie: setEraCookie, deleteEraCookie: deleteEraCookie,
+    jar: jar, setEraCookie: setEraCookie, deleteEraCookie: deleteEraCookie, timers: timers,
+    onNotificationClicked: onNotificationClicked,
     // Resolves once every status task queued so far has run.
     drain: function () { return context.serialized(function () {}); }
   };
@@ -785,6 +817,53 @@ test("after a logout, a page without eRA's timer does not restart the alarm; a l
   await fake.bg.handleMessage(pageReady({ managerPresent: true, minsLeft: 44 }), { tab: { id: 1 } });
   assert.equal(fake.store.sessionStatus, "logged-in");
   assert.ok(fake.alarms["era-keep-alive"]);
+});
+
+test("chrome.action rejecting with 'No SW' never produces an unhandled rejection, and the badge recovers on retry", async function () {
+  var unhandled = [];
+  function onUnhandled(reason) { unhandled.push(reason); }
+  process.on("unhandledRejection", onUnhandled);
+  var fake;
+  try {
+    // As if the service worker were still starting: every chrome.action call
+    // rejects, including the one the top-level updateBadge() makes.
+    fake = makeFake({ storage: { sessionStatus: "logged-in" }, tabs: [], actionFailures: 100 });
+    await settle();
+    assert.equal(fake.calls.badgeText.length, 0);
+    assert.equal(fake.timers.length, 1);
+    assert.equal(fake.timers[0].delay, 1000);
+
+    // Calling it directly while chrome.action is still failing must resolve,
+    // not reject.
+    await fake.bg.updateBadge();
+    await settle();
+    assert.equal(fake.calls.badgeText.length, 0);
+
+    // Once the service worker is up, the scheduled retry gets the badge right.
+    fake.failures.action = 0;
+    fake.timers[0].fn();
+    await settle();
+    assert.deepEqual(fake.calls.badgeText, ["ON"]);
+  } finally {
+    process.removeListener("unhandledRejection", onUnhandled);
+  }
+  assert.deepEqual(unhandled, []);
+});
+
+test("clicking the session-ended notification opens the popup in a tab and clears it", async function () {
+  var fake = makeFake({ storage: { sessionStatus: "logged-in" }, tabs: [eraTab(1, LOGIN)] });
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  assert.equal(fake.calls.notifications.length, 1);
+  await Promise.all(fake.onNotificationClicked.listeners.map(function (fn) { return fn("era-session-ended"); }));
+  await settle();
+  assert.deepEqual(fake.calls.tabsCreated, [{ url: "chrome-extension://fake-extension-id/popup.html" }]);
+  assert.deepEqual(fake.calls.notificationsCleared, ["era-session-ended"]);
+
+  // A click on any other notification id is ignored.
+  await Promise.all(fake.onNotificationClicked.listeners.map(function (fn) { return fn("some-other-id"); }));
+  await settle();
+  assert.equal(fake.calls.tabsCreated.length, 1);
+  assert.equal(fake.calls.notificationsCleared.length, 1);
 });
 
 test("a cookie deletion, a login page load and a tick at the same moment notify once", async function () {

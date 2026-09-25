@@ -74,26 +74,32 @@ function appendDiagnosticEntries(entries) {
   return logWrite;
 }
 
+// chrome.action can reject with "No SW" while the service worker is still
+// starting (e.g. right after a reload, before this call is the first thing
+// to run). That is never worth surfacing: the next badge update supersedes it.
+async function setBadge(color, text) {
+  try {
+    await chrome.action.setBadgeBackgroundColor({ color: color });
+    await chrome.action.setBadgeText({ text: text });
+  } catch (error) {
+    console.warn("eRA Keep Alive: could not update the badge", error);
+  }
+}
+
 async function updateBadge() {
   var state = await getState();
   if (!state.enabled) {
-    await chrome.action.setBadgeBackgroundColor({ color: "#6b7280" });
-    await chrome.action.setBadgeText({ text: "OFF" });
+    await setBadge("#6b7280", "OFF");
   } else if (state.sessionStatus === "logged-out") {
-    await chrome.action.setBadgeBackgroundColor({ color: "#b91c1c" });
-    await chrome.action.setBadgeText({ text: "!" });
+    await setBadge("#b91c1c", "!");
   } else if (state.sessionStatus === "logged-in" && state.serverWarning) {
-    await chrome.action.setBadgeBackgroundColor({ color: "#b45309" });
-    await chrome.action.setBadgeText({ text: "ON!" });
+    await setBadge("#b45309", "ON!");
   } else if (state.sessionStatus === "logged-in") {
-    await chrome.action.setBadgeBackgroundColor({ color: "#15803d" });
-    await chrome.action.setBadgeText({ text: "ON" });
+    await setBadge("#15803d", "ON");
   } else if (state.sessionStatus === "idle") {
-    await chrome.action.setBadgeBackgroundColor({ color: "#6b7280" });
-    await chrome.action.setBadgeText({ text: "…" });
+    await setBadge("#6b7280", "…");
   } else {
-    await chrome.action.setBadgeBackgroundColor({ color: "#6b7280" });
-    await chrome.action.setBadgeText({ text: "?" });
+    await setBadge("#6b7280", "?");
   }
 }
 
@@ -653,7 +659,10 @@ chrome.runtime.onStartup.addListener(function () {
 });
 
 chrome.alarms.onAlarm.addListener(function (alarm) {
-  if (alarm.name === ALARM_NAME) nudgeEraTabs(alarm);
+  if (alarm.name !== ALARM_NAME) return;
+  nudgeEraTabs(alarm).catch(function (error) {
+    console.warn("eRA Keep Alive: nudge failed", error);
+  });
 });
 
 chrome.runtime.onMessage.addListener(function (message, sender) {
@@ -664,6 +673,14 @@ chrome.runtime.onMessage.addListener(function (message, sender) {
 
 chrome.cookies.onChanged.addListener(onCookieChanged);
 
+chrome.notifications.onClicked.addListener(function (notificationId) {
+  if (notificationId !== "era-session-ended") return;
+  chrome.tabs.create({ url: chrome.runtime.getURL("popup.html") }).catch(function (error) {
+    console.warn("eRA Keep Alive: could not open the popup tab", error);
+  });
+  chrome.notifications.clear(notificationId).catch(function () {});
+});
+
 chrome.storage.onChanged.addListener(function (changes, area) {
   if (area !== "local" || !changes.enabled) return;
   serialized(function () { return handleEnabledChange(changes.enabled.newValue); }).catch(function (error) {
@@ -671,4 +688,12 @@ chrome.storage.onChanged.addListener(function (changes, area) {
   });
 });
 
-updateBadge();
+// The service worker may not be fully started the moment this file first
+// runs (e.g. right after a reload), so the very first chrome.action call can
+// reject with "No SW". updateBadge() already swallows that; retry once
+// shortly after, once the worker is certainly up, so the badge still ends
+// up correct.
+updateBadge().catch(function () {});
+setTimeout(function () {
+  updateBadge().catch(function () {});
+}, 1000);
