@@ -41,6 +41,9 @@ What it does, while enabled and an eRA Commons tab is open:
   hour even while eRA's page timer is still running. You can switch this
   off in the popup ("Also ping eRA's server"); the page nudges carry on
   either way.
+- If eRA's server ends your session anyway (it appears to have a fixed
+  session limit), it shows a notification right away — "eRA ended your
+  session — log in again" — instead of letting the old tab look alive.
 - It keeps a small log on your own computer — times, page names, and
   whether eRA's timer was extended — so you can see what it has been
   doing. That log never leaves your computer unless you press "Copy log"

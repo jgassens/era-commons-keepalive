@@ -37,7 +37,7 @@ function fakeElement(tag) {
 function renderPopup(state, options) {
   options = options || {};
   var ids = ["enabled", "ping-server", "status", "signed-in", "last-nudge", "logout-at", "last-click",
-    "server-warning", "logout-records", "diagnostic-log", "copy-log", "version", "open-tab"];
+    "server-warning", "session-pattern", "logout-records", "diagnostic-log", "copy-log", "version", "open-tab"];
   var elements = {};
   ids.forEach(function (id) { elements[id] = fakeElement(id === "logout-records" ? "ul" : "div"); });
   var warnings = [];
@@ -220,4 +220,43 @@ test("a server-ended record gets the keep-the-ping-on note in the popup", async 
   await settle();
   var records = texts(popup.elements["logout-records"]);
   assert.equal(records[1], "eRA's server ended this session even though its page timer was still running. Keep \"Also ping eRA's server\" on.");
+});
+
+test("a server-ended session shows in the status line, with each session's length and eRA's apparent limit", async function () {
+  var start = Date.UTC(2026, 8, 25, 17, 50);
+  function serverEnd(minutes, dayOffset) {
+    var startedAt = start - dayOffset * 86400000;
+    return {
+      loggedOutDetectedAt: startedAt + (minutes + 0.5) * 60000,
+      reason: "eRA's server ended the session (keep-alive refused)",
+      serverEnded: true,
+      sessionStartedAt: startedAt,
+      minutesSinceSignIn: minutes + 0.5,
+      estimatedEndAt: startedAt + minutes * 60000,
+      firstRefusalAt: startedAt + minutes * 60000,
+      lastServerAcceptedAt: startedAt + (minutes - 4) * 60000,
+      pingServer: true,
+      lastServerPing: "server rejected (redirect)"
+    };
+  }
+  var latest = serverEnd(130, 0);
+  var popup = renderPopup({ sessionStatus: "logged-out", logoutRecords: [latest, serverEnd(128, 1)] });
+  await settle();
+  var e = popup.elements;
+  var matcher = popup.context.EraKeepAlive;
+  assert.deepEqual(popup.warnings, []);
+  assert.equal(e.status.textContent, "eRA's server ended your session at " + matcher.clockTime(latest.estimatedEndAt) +
+    " — 2 h 10 min after sign-in. Log in again.");
+  assert.equal(e["session-pattern"].hidden, false);
+  assert.equal(e["session-pattern"].textContent, "eRA seems to end sessions about 2 h 9 min after sign-in (seen 2 times).");
+  var records = texts(e["logout-records"]);
+  assert.match(records[0], /session length 2 h 10 min/);
+  assert.match(records[1], /fixed session limit/);
+  assert.match(records[2], /session length 2 h 8 min/);
+
+  // Signed in again: the status line is the normal one; the pattern stays.
+  var again = renderPopup({ sessionStatus: "logged-in", logoutRecords: [latest] });
+  await settle();
+  assert.equal(again.elements.status.textContent, "Enabled — logged in");
+  assert.equal(again.elements["session-pattern"].hidden, true);
 });

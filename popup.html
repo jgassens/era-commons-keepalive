@@ -31,6 +31,7 @@
       #diagnostic-log div { margin: 4px 0; }
       #copy-log { margin-top: 8px; padding: 5px 9px; }
       #server-warning { margin: 12px 0 0; color: #92400e; }
+      #session-pattern { margin: 0 0 6px; color: #1f2937; font-weight: 600; }
       #version { margin-top: 16px; color: #6b7280; font-size: 11px; }
     </style>
   </head>
@@ -53,6 +54,7 @@
       <button id="copy-log" type="button">Copy log</button>
     </details>
     <h2>Recent logouts</h2>
+    <p id="session-pattern" hidden></p>
     <ul id="logout-records"></ul>
     <div id="version"></div>
     <script src="src/matcher.js"></script>

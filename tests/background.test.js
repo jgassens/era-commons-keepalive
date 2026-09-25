@@ -412,7 +412,7 @@ test("the server is pinged only when the switch is on, once per keep-alive URL",
   assert.ok(logLines(on).some(function (line) { return line.endsWith("server 200"); }));
 });
 
-test("a keep-alive redirect with a live cookie warns but keeps the session and the alarm", async function () {
+test("one keep-alive refusal only warns and schedules a 30-second recheck", async function () {
   var fake = makeFake({
     storage: { sessionStatus: "logged-in", pingServer: true, sessionStartedAt: 7 },
     tabs: [eraTab(1, HOME, liveManager({ keepAliveUrl: ALIVE_URL, server: "redirect" }))]
@@ -425,18 +425,179 @@ test("a keep-alive redirect with a live cookie warns but keeps the session and t
   assert.equal((fake.store.logoutRecords || []).length, 0);
   assert.equal(fake.calls.notifications.length, 0);
   assert.ok(fake.alarms["era-keep-alive"]);
+  assert.equal(fake.alarms["era-server-recheck"].delayInMinutes, 0.5);
+  assert.equal(fake.alarms["era-server-recheck"].periodInMinutes, undefined);
+  assert.equal(fake.store.refusalCount, 1);
+  assert.equal(typeof fake.store.firstRefusalAt, "number");
   assert.ok(fake.store.serverWarning);
   assert.equal(fake.calls.badgeText[fake.calls.badgeText.length - 1], "ON!");
   var lines = logLines(fake);
   assert.ok(lines.some(function (line) { return line.endsWith("server rejected (redirect)"); }), lines.join("\n"));
-  assert.ok(lines.some(function (line) { return /server rejected keep-alive \(redirect\) \/commonsplus\/home\.era; eRA timer still live, still nudging$/.test(line); }));
+  assert.ok(lines.some(function (line) { return /server refused keep-alive — rechecking in 30 s \(\/commonsplus\/home\.era\)$/.test(line); }), lines.join("\n"));
 
-  // The next tick nudges again; a normal answer clears the warning.
+  // The next answer is normal: the warning and the refusal state clear.
   fake.tabs[0].page.server = "ok";
   await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
   assert.equal(fake.tabs[0].nudges, 2);
   assert.equal(fake.store.serverWarning, null);
+  assert.equal(fake.store.firstRefusalAt, null);
+  assert.equal(fake.store.refusalCount, 0);
+  assert.equal(typeof fake.store.lastServerAcceptedAt, "number");
+  assert.equal(fake.alarms["era-server-recheck"], undefined);
   assert.equal(fake.calls.badgeText[fake.calls.badgeText.length - 1], "ON");
+});
+
+// A session signed in 130 minutes ago whose server has just stopped
+// accepting keep-alives, after an accepted ping 4 minutes earlier.
+function serverEndFake(extraStorage) {
+  return makeFake({
+    storage: Object.assign({
+      sessionStatus: "logged-in",
+      pingServer: true,
+      sessionStartedAt: Date.now() - 130 * MINUTE,
+      lastServerAcceptedAt: Date.now() - 4 * MINUTE
+    }, extraStorage),
+    tabs: [eraTab(1, HOME, liveManager({ keepAliveUrl: ALIVE_URL, server: "redirect" }))]
+  });
+}
+
+async function fireRecheck(fake) {
+  fake.chrome.alarms.onAlarm.listeners.forEach(function (fn) {
+    fn({ name: "era-server-recheck", scheduledTime: Date.now() });
+  });
+  await fake.drain();
+}
+
+test("two refusals in a row end the session with one record and one notification", async function () {
+  var fake = serverEndFake();
+  var acceptedAt = fake.store.lastServerAcceptedAt;
+  var startedAt = fake.store.sessionStartedAt;
+  fake.alarms["era-keep-alive"] = { name: "era-keep-alive", periodInMinutes: 4 };
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  var firstRefusalAt = fake.store.firstRefusalAt;
+  assert.equal(fake.calls.notifications.length, 0);
+
+  await fireRecheck(fake);
+  assert.equal(fake.tabs[0].pings, 2);
+  assert.equal(fake.store.sessionStatus, "logged-out");
+  assert.equal(fake.store.logoutRecords.length, 1);
+  var record = fake.store.logoutRecords[0];
+  assert.equal(record.reason, "eRA's server ended the session (keep-alive refused)");
+  assert.equal(record.serverEnded, true);
+  assert.equal(record.sessionStartedAt, startedAt);
+  assert.equal(typeof record.minutesSinceSignIn, "number");
+  assert.ok(record.minutesSinceSignIn >= 130 && record.minutesSinceSignIn < 131);
+  assert.equal(record.lastServerAcceptedAt, acceptedAt);
+  assert.equal(record.firstRefusalAt, firstRefusalAt);
+  assert.equal(record.estimatedEndAt, firstRefusalAt);
+  assert.equal(matcher.sessionLengthMinutes(record), 130);
+
+  assert.equal(fake.calls.notifications.length, 1);
+  var note = fake.calls.notifications[0];
+  assert.equal(note.title, "eRA ended your session — log in again");
+  assert.equal(note.message, "eRA's server stopped accepting your session around " + matcher.clockTime(firstRefusalAt) +
+    ", about 2 h 10 min after you signed in.");
+
+  // Nudging stops and the refusal state is gone.
+  assert.equal(fake.alarms["era-keep-alive"], undefined);
+  assert.equal(fake.alarms["era-server-recheck"], undefined);
+  assert.equal(fake.store.serverWarning, null);
+  assert.equal(fake.store.firstRefusalAt, null);
+  assert.equal(fake.store.refusalCount, 0);
+  assert.equal(typeof fake.store.serverEndedAt, "number");
+  assert.equal(fake.calls.badgeText[fake.calls.badgeText.length - 1], "!");
+  assert.ok(logLines(fake).some(function (line) {
+    return line.includes("status logged-in -> logged-out: eRA's server ended the session (keep-alive refused)");
+  }));
+
+  // Clicking the notification still opens the log in a tab.
+  await Promise.all(fake.onNotificationClicked.listeners.map(function (fn) { return fn("era-session-ended"); }));
+  await settle();
+  assert.deepEqual(fake.calls.tabsCreated, [{ url: "chrome-extension://fake-extension-id/popup.html" }]);
+});
+
+test("the second refusal may come from the next regular tick, and the notification omits an unknown sign-in", async function () {
+  var fake = serverEndFake({ sessionStartedAt: null });
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  assert.equal(fake.store.sessionStatus, "logged-out");
+  assert.equal(fake.store.logoutRecords.length, 1);
+  assert.equal(fake.calls.notifications.length, 1);
+  assert.doesNotMatch(fake.calls.notifications[0].message, /after you signed in/);
+  assert.match(fake.calls.notifications[0].message, /^eRA's server stopped accepting your session around .+\.$/);
+});
+
+test("an accepted ping between two refusals resets the count, so nothing ends", async function () {
+  var fake = serverEndFake();
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  fake.tabs[0].page.server = "ok";
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  fake.tabs[0].page.server = "redirect";
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  await fake.drain();
+  assert.equal(fake.store.sessionStatus, "logged-in");
+  assert.equal((fake.store.logoutRecords || []).length, 0);
+  assert.equal(fake.calls.notifications.length, 0);
+  assert.equal(fake.store.refusalCount, 1);
+  assert.ok(fake.alarms["era-server-recheck"]);
+});
+
+test("a recheck with nothing pending does not ping", async function () {
+  var fake = serverEndFake({ pingServer: false });
+  await fireRecheck(fake);
+  assert.equal(fake.tabs[0].pings, 0);
+  assert.equal(fake.tabs[0].nudges, 0);
+});
+
+test("after a server end, stale-page cookie writes do not restore logged-in; a page eRA served later does", async function () {
+  var fake = serverEndFake();
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  await fireRecheck(fake);
+  assert.equal(fake.store.sessionStatus, "logged-out");
+  var endedAt = fake.store.serverEndedAt;
+  var startedBefore = fake.store.sessionStartedAt;
+
+  // The user clicks and scrolls on the stale page: eRA's script rewrites
+  // the cookie each time.
+  await fake.setEraCookie(Date.now() + 45 * MINUTE);
+  await fake.setEraCookie(Date.now() + 45 * MINUTE + 1000);
+  await fake.drain();
+  assert.equal(fake.store.sessionStatus, "logged-out");
+  assert.equal(fake.alarms["era-keep-alive"], undefined);
+
+  // The stale tab re-reports itself (as after an extension update): it
+  // loaded before the end, so it does not count either.
+  await fake.bg.handleMessage(pageReady({ loadedAt: endedAt - 60 * MINUTE }), { tab: { id: 1 } });
+  assert.equal(fake.store.sessionStatus, "logged-out");
+  assert.equal(fake.calls.notifications.length, 1);
+
+  // The user signs in again and eRA serves a new page.
+  var at = Date.now() + 1;
+  await fake.bg.handleMessage(pageReady({ at: at, loadedAt: at }), { tab: { id: 1 } });
+  assert.equal(fake.store.sessionStatus, "logged-in");
+  assert.equal(fake.store.serverEndedAt, null);
+  assert.equal(fake.store.sessionStartedAt, at);
+  assert.notEqual(fake.store.sessionStartedAt, startedBefore);
+  assert.ok(fake.alarms["era-keep-alive"]);
+  assert.equal(fake.calls.notifications.length, 1);
+});
+
+test("after a server end, an accepted ping restores logged-in as a new session", async function () {
+  var fake = serverEndFake();
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  await fireRecheck(fake);
+  assert.equal(fake.store.sessionStatus, "logged-out");
+  // Switching the extension off and on sets unknown and restarts ticking.
+  await fake.chrome.storage.local.set({ enabled: false });
+  await fake.chrome.storage.local.set({ enabled: true });
+  await fake.drain();
+  fake.tabs[0].page.server = "redirect";
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  assert.notEqual(fake.store.sessionStatus, "logged-in");
+  fake.tabs[0].page.server = "ok";
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  assert.equal(fake.store.sessionStatus, "logged-in");
+  assert.equal(fake.store.serverEndedAt, null);
 });
 
 test("a server timeout is logged and keeps the session", async function () {

@@ -46,7 +46,8 @@ function describeLogoutRecord(record) {
     when = "probably ended around " + matcher.formatTime(record.estimatedEndAt) + ", noticed " + when;
   }
   var facts = [];
-  if (isNumber(record.minutesSinceSignIn)) facts.push(matcher.formatMinutes(record.minutesSinceSignIn) + " after sign-in");
+  var length = matcher.sessionLengthMinutes(record);
+  if (isNumber(length)) facts.push("session length " + matcher.formatDuration(length));
   if (isNumber(record.minutesSinceLastNudge)) {
     facts.push(matcher.formatMinutes(record.minutesSinceLastNudge) + " after last activity nudge");
   }
@@ -116,8 +117,10 @@ function renderDiagnosticLog(entries) {
 }
 
 function renderStatus(state) {
+  var latest = listFrom(state.logoutRecords)[0];
   document.getElementById("status").textContent = !state.enabled ? "Disabled" :
     state.sessionStatus === "logged-in" ? "Enabled — logged in" :
+    state.sessionStatus === "logged-out" && matcher.isServerEndRecord(latest) ? matcher.serverEndStatus(latest) :
     state.sessionStatus === "logged-out" ? "Enabled — logged out" :
     state.sessionStatus === "idle" ? "No eRA tab open — not keeping the session alive" : "Enabled — status unknown";
   document.getElementById("signed-in").textContent =
@@ -133,8 +136,19 @@ function renderServerWarning(state) {
   var warning = state.serverWarning && typeof state.serverWarning === "object" ? state.serverWarning : null;
   var showWarning = !!state.enabled && state.sessionStatus === "logged-in" && !!warning;
   serverWarning.hidden = !showWarning;
-  serverWarning.textContent = showWarning ? "eRA's server rejected the keep-alive (redirect) at " +
-    matcher.formatTime(warning.at) + ", but eRA's timer is still live, so the extension keeps nudging." : "";
+  serverWarning.textContent = !showWarning ? "" : warning.recheck ?
+    "eRA's server refused the keep-alive at " + matcher.formatTime(warning.at) +
+      ". Checking again in 30 seconds; if it refuses again, the session has ended." :
+    "eRA's server rejected the keep-alive (redirect) at " + matcher.formatTime(warning.at) +
+      ", but eRA's timer is still live, so the extension keeps nudging.";
+}
+
+// Shown once two server-ended sessions lasted about as long as each other.
+function renderSessionPattern(records) {
+  var pattern = document.getElementById("session-pattern");
+  var sentence = matcher.sessionEndPattern(records);
+  pattern.hidden = !sentence;
+  pattern.textContent = sentence || "";
 }
 
 function render(state) {
@@ -148,6 +162,7 @@ function render(state) {
   });
   section("status", function () { renderStatus(state); });
   section("server-warning", function () { renderServerWarning(state); });
+  section("session-pattern", function () { renderSessionPattern(listFrom(state.logoutRecords)); });
   section("logout-records", function () { renderLogoutRecords(listFrom(state.logoutRecords)); });
   section("diagnostic-log", function () { renderDiagnosticLog(listFrom(state.diagnosticLog)); });
 }

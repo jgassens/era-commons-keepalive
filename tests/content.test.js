@@ -43,7 +43,7 @@ function element(id, options) {
 
 // A fake eRA page. options:
 //   enabled (stored switch), logoutAt (cookie value or null), manager (timeout control present),
-//   modalVisible (eRA's Bootstrap timeout modal shown), fetch (replacement fetch), eraPage (true:
+//   sessionStatus (stored status), modalVisible (eRA's Bootstrap timeout modal shown), fetch (replacement fetch), eraPage (true:
 //   a scroll renews the cookie like eRA's jQuery handler).
 function makePage(options) {
   options = Object.assign({ enabled: true, logoutAt: Date.now() + 30 * MINUTE, manager: true, modalVisible: false, eraPage: true }, options);
@@ -99,7 +99,7 @@ function makePage(options) {
       sendMessage: function (message) { calls.sent.push(message); return Promise.resolve(); }
     },
     storage: {
-      local: { get: function () { return Promise.resolve({ enabled: options.enabled }); } },
+      local: { get: function () { return Promise.resolve({ enabled: options.enabled, sessionStatus: options.sessionStatus || "unknown" }); } },
       onChanged: listenerSlot()
     }
   };
@@ -337,4 +337,25 @@ test("turning the switch off stops the clicks", async function () {
   var reply = await page.send({ type: "nudge-activity", ping: true });
   assert.equal(reply.disabled, true);
   assert.equal(page.calls.scrolls, 0);
+});
+
+test("Continue is not pressed while the stored session status is logged-out, and is again once logged in", async function () {
+  var page = makePage({ modalVisible: true, sessionStatus: "logged-out" });
+  page.load();
+  await flush();
+  page.advance(60 * 1000);
+  assert.equal(page.continueButton.clicks, 0);
+  assert.ok(!page.calls.sent.some(function (message) { return message.type === "auto-click"; }));
+
+  page.chrome.storage.onChanged.listeners.forEach(function (fn) {
+    fn({ sessionStatus: { oldValue: "logged-out", newValue: "logged-in" } }, "local");
+  });
+  assert.equal(page.continueButton.clicks, 1);
+
+  // Logged out again: the warning is left for eRA's own logout.
+  page.chrome.storage.onChanged.listeners.forEach(function (fn) {
+    fn({ sessionStatus: { oldValue: "logged-in", newValue: "logged-out" } }, "local");
+  });
+  page.advance(5 * MINUTE);
+  assert.equal(page.continueButton.clicks, 1);
 });

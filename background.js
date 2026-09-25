@@ -4,6 +4,9 @@ importScripts("src/matcher.js");
 
 var matcher = globalThis.EraKeepAlive;
 var ALARM_NAME = "era-keep-alive";
+// A one-shot second look after eRA's server first refuses a keep-alive.
+var RECHECK_ALARM_NAME = "era-server-recheck";
+var RECHECK_DELAY_MINUTES = 0.5;
 var NUDGE_PERIOD_MINUTES = 4;
 var LATE_ALARM_MS = 60 * 1000;
 // eRA rewrites its cookie on every click, key press and scroll. The stored
@@ -30,6 +33,14 @@ var DEFAULT_STATE = {
   lastAutoClick: null,
   lastServerResult: null,
   serverWarning: null,
+  // Time of the last keep-alive ping eRA's server accepted (any 2xx).
+  lastServerAcceptedAt: null,
+  // Refusals in a row since the last accepted ping; two end the session.
+  firstRefusalAt: null,
+  refusalCount: 0,
+  // Set when eRA's server ended the session. Until a page eRA served after
+  // this time, or an accepted ping, the stale eRA tab cannot restore logged-in.
+  serverEndedAt: null,
   logoutRecords: []
 };
 var logWrite = Promise.resolve();
@@ -252,27 +263,45 @@ function logoutRecord(prior, detail, at) {
     minutesLeftAtLastNudge: lastNudgeAt === null || typeof prior.lastNudgeTimerAt !== "number" ? null :
       matcher.roundMinutes((prior.lastNudgeTimerAt - lastNudgeAt) / 60000),
     estimatedEndAt: typeof detail.estimatedEndAt === "number" ? detail.estimatedEndAt : null,
+    serverEnded: !!detail.serverEnd,
+    lastServerAcceptedAt: typeof prior.lastServerAcceptedAt === "number" ? prior.lastServerAcceptedAt : null,
+    firstRefusalAt: typeof prior.firstRefusalAt === "number" ? prior.firstRefusalAt : null,
     lastServerPing: prior.lastServerResult
   };
 }
 
 // The one code path for every status change, whatever noticed it. Callers
 // run inside serialized(). next is { status, reason, path }, plus
-// { silent, estimatedEndAt } for a session that ended while nothing watched.
+// { silent, estimatedEndAt } for a session that ended while nothing watched,
+// { serverEnd } for one eRA's server ended, and { fresh } for logged-in
+// evidence that eRA's server itself produced (see serverEndedAt).
 async function commitStatus(prior, next, at, updates) {
   var priorStatus = prior.sessionStatus;
+  var serverEnded = typeof prior.serverEndedAt === "number";
+  // After eRA's server ended the session, the old eRA tab still holds a live
+  // page-timer cookie, and every click on it rewrites that cookie. Only fresh
+  // evidence may bring the session back.
+  if (next.status === "logged-in" && priorStatus !== "logged-in" && serverEnded && !next.fresh) {
+    next = { status: priorStatus, reason: null, path: null };
+    updates = {};
+  }
   var nextStatus = next.status;
   updates = Object.assign({}, updates, { sessionStatus: nextStatus });
   if (nextStatus === "logged-out") {
     updates.eraLogoutAt = null;
     updates.serverWarning = null;
   }
+  if (nextStatus !== "logged-in") {
+    updates.firstRefusalAt = null;
+    updates.refusalCount = 0;
+  }
   // Leaving idle for logged-in keeps the sign-in time unless the caller says
-  // the session was a new one.
+  // the session was a new one; a session after a server end is always new.
   if (nextStatus === "logged-in" && priorStatus !== "logged-in") {
-    if (priorStatus !== "idle" && !("sessionStartedAt" in updates)) updates.sessionStartedAt = at;
+    if ((priorStatus !== "idle" || serverEnded) && !("sessionStartedAt" in updates)) updates.sessionStartedAt = at;
     if (!("serverWarning" in updates)) updates.serverWarning = null;
   }
+  if (nextStatus === "logged-in") updates.serverEndedAt = null;
   if (nextStatus === "idle" && priorStatus !== "idle") updates.idleSince = at;
   if (nextStatus !== "idle" && priorStatus === "idle") updates.idleSince = null;
 
@@ -298,26 +327,46 @@ async function commitStatus(prior, next, at, updates) {
   await setState(updates);
   await updateBadge();
   if (priorStatus !== nextStatus || nextStatus === "logged-out") await configureAlarm();
+  if (nextStatus !== "logged-in") await chrome.alarms.clear(RECHECK_ALARM_NAME);
   if (notify) {
+    var text = next.notification || {
+      title: "eRA Commons session ended - log in again",
+      message: "Please log in again to continue working."
+    };
     await chrome.notifications.create("era-session-ended", {
       type: "basic",
       iconUrl: "icons/icon128.png",
-      title: "eRA Commons session ended - log in again",
-      message: "Please log in again to continue working."
+      title: text.title,
+      message: text.message
     });
   }
   return nextStatus;
 }
 
+// What the keep-alive pings in one tick said. A refusal counts only from a
+// tab that was actually pinged; "accepted" is any 2xx answer.
+function serverOutcome(results) {
+  var refused = results.find(function (result) {
+    return result.serverCalled && (result.serverRejected || result.serverRedirectedToLogin);
+  });
+  var accepted = results.some(function (result) {
+    return result.serverCalled && !result.serverRejected && !result.serverRedirectedToLogin &&
+      typeof result.serverStatus === "number" && result.serverStatus >= 200 && result.serverStatus < 300;
+  });
+  return { refused: refused || null, accepted: accepted };
+}
+
 // Alarms and page loads both land here. options.nudged is true only when the
 // results came from a nudge (so they carry a fresh cookie and server answer);
-// options.cookie is the cookie read straight from Chrome, when there is one.
+// options.cookie is the cookie read straight from Chrome, when there is one;
+// options.fresh marks a page eRA served after its server ended the session.
 async function applyResults(results, at, options) {
   options = options || {};
   var prior = await getState();
   var decision = matcher.decideSession(results, prior.sessionStatus, options.cookie);
   var updates = {};
   var cookie = options.cookie;
+  if (options.fresh && decision.status === "logged-in") decision.fresh = true;
 
   if (options.nudged) {
     var active = results.find(function (result) {
@@ -333,16 +382,36 @@ async function applyResults(results, at, options) {
       updates.eraLogoutAt = cookie.state === "live" ? cookie.logoutAt : null;
     }
 
-    var rejected = results.find(function (result) { return result.serverRejected || result.serverRedirectedToLogin; });
-    var answered = results.some(function (result) {
-      return result.serverCalled && typeof result.serverStatus === "number" && !result.serverRejected;
-    });
-    if (rejected && decision.status === "logged-in") {
-      // eRA's timer is still live, so this is a warning, not a logout.
-      updates.serverWarning = { at: at, path: rejected.path };
-      await appendDiagnosticEntries([{ type: "server-warning", at: at, path: rejected.path }]);
-    } else if (answered) {
+    var server = serverOutcome(results);
+    if (server.accepted) {
+      updates.lastServerAcceptedAt = at;
+      updates.firstRefusalAt = null;
+      updates.refusalCount = 0;
       updates.serverWarning = null;
+      // eRA's server itself vouches for this session.
+      if (decision.status === "logged-in") decision.fresh = true;
+      await chrome.alarms.clear(RECHECK_ALARM_NAME);
+    } else if (server.refused && decision.status === "logged-in" && prior.sessionStatus === "logged-in") {
+      // eRA's page timer is live only because we keep pushing it, so the
+      // server's answer is what counts. Once could be a blip; twice in a row
+      // means the server has ended the session.
+      if (typeof prior.firstRefusalAt === "number") {
+        decision = {
+          status: "logged-out",
+          reason: matcher.SERVER_END_REASON,
+          path: server.refused.path,
+          serverEnd: true,
+          estimatedEndAt: prior.firstRefusalAt,
+          notification: matcher.serverEndNotification(prior.firstRefusalAt, prior.sessionStartedAt)
+        };
+        updates.serverEndedAt = at;
+      } else {
+        updates.firstRefusalAt = at;
+        updates.refusalCount = 1;
+        updates.serverWarning = { at: at, path: server.refused.path, recheck: true };
+        await appendDiagnosticEntries([{ type: "server-refused", at: at, path: server.refused.path }]);
+        await chrome.alarms.create(RECHECK_ALARM_NAME, { delayInMinutes: RECHECK_DELAY_MINUTES });
+      }
     }
   }
   return commitStatus(prior, decision, at, updates);
@@ -425,7 +494,18 @@ function nudgeEraTabs(alarm) {
   return serialized(function () { return runTick(alarm); });
 }
 
-async function runTick(alarm) {
+// The one-shot recheck after a first refusal: a normal tick whose server
+// ping is on (even if the switch was turned off since) for one active tab.
+function recheckServer(alarm) {
+  return serialized(async function () {
+    var state = await getState();
+    if (typeof state.firstRefusalAt !== "number") return;
+    await runTick(alarm, { forcePing: true });
+  });
+}
+
+async function runTick(alarm, options) {
+  options = options || {};
   try {
     var state = await getState();
     if (!state.enabled) return;
@@ -451,22 +531,24 @@ async function runTick(alarm) {
       });
     }
 
-    // One server ping per alarm per keep-alive URL, from one active tab.
+    // One server ping per alarm per keep-alive URL, from one active tab; a
+    // recheck pings from one active tab only.
     var pingTabIds = {};
-    if (state.pingServer) {
+    if (state.pingServer || options.forcePing) {
       var seenUrls = {};
-      probes.forEach(function (probe) {
+      probes.some(function (probe) {
         var url = probe.reply && probe.reply.keepAliveUrl;
-        if (!url || seenUrls[url] || matcher.classifyTabResult(probe.result, state.sessionStatus) !== "active") return;
+        if (!url || seenUrls[url] || matcher.classifyTabResult(probe.result, state.sessionStatus) !== "active") return false;
         seenUrls[url] = true;
         pingTabIds[probe.tab.id] = true;
+        return !!options.forcePing;
       });
     }
     var results = await Promise.all(probes.map(function (probe) {
       return probe.reply ? nudgeTab(probe.tab, !!pingTabIds[probe.tab.id]) : probe.result;
     }));
     results.forEach(function (result) {
-      result.pingServer = !!state.pingServer;
+      result.pingServer = !!state.pingServer || !!pingTabIds[result.tabId];
       entries.push(nudgeLogEntry(result, at));
     });
     await appendDiagnosticEntries(entries);
@@ -510,7 +592,12 @@ async function handlePageReady(message, sender) {
   }
   var classification = matcher.classifyTabResult(result, state.sessionStatus);
   if (classification === "active") {
-    await applyResults([result], at);
+    // After eRA's server ended the session, only a page it served later
+    // counts. loadedAt is when the page itself loaded, which for a tab the
+    // extension re-injected into can be long before this message.
+    var loadedAt = typeof message.loadedAt === "number" ? message.loadedAt : at;
+    var fresh = typeof state.serverEndedAt !== "number" || loadedAt > state.serverEndedAt;
+    await applyResults([result], at, { fresh: fresh });
   } else if (classification === "ended") {
     // Judge by every open eRA tab and the cookie, as an alarm would, but
     // trust this page's own report for its tab: it may already have left eRA.
@@ -535,6 +622,9 @@ async function handleCookieChange(change) {
   }
   if (cookie.state === "live") {
     if (change.kind !== "live") return;
+    // Clicks on the stale tab after eRA's server ended the session rewrite
+    // this cookie; that is not a new session (see commitStatus).
+    if (state.sessionStatus !== "logged-in" && typeof state.serverEndedAt === "number") return;
     if (state.sessionStatus !== "logged-in") {
       await commitStatus(state, { status: "logged-in", reason: "eRA timer cookie set", path: null }, at,
         { eraLogoutAt: cookie.logoutAt });
@@ -590,6 +680,7 @@ function handleMessage(message, sender) {
 async function handleEnabledChange(newValue) {
   if (!newValue) {
     await chrome.alarms.clear(ALARM_NAME);
+    await chrome.alarms.clear(RECHECK_ALARM_NAME);
   } else {
     var prior = await getState();
     if (prior.sessionStatus !== "unknown") {
@@ -659,8 +750,10 @@ chrome.runtime.onStartup.addListener(function () {
 });
 
 chrome.alarms.onAlarm.addListener(function (alarm) {
-  if (alarm.name !== ALARM_NAME) return;
-  nudgeEraTabs(alarm).catch(function (error) {
+  var run = alarm.name === ALARM_NAME ? nudgeEraTabs(alarm) :
+    alarm.name === RECHECK_ALARM_NAME ? recheckServer(alarm) : null;
+  if (!run) return;
+  run.catch(function (error) {
     console.warn("eRA Keep Alive: nudge failed", error);
   });
 });

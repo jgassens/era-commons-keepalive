@@ -28,6 +28,9 @@
   var matcher = globalThis.EraKeepAlive;
   var lastClickAtByButton = new WeakMap();
   var enabled = false;
+  // Once the extension has seen the session end, eRA's own logout is allowed
+  // to show: Continue is not pressed on a dead session's warning.
+  var loggedOut = false;
   var stopped = false;
   var observer = null;
   var pollTimer = null;
@@ -81,7 +84,7 @@
       stop();
       return;
     }
-    if (!enabled) return;
+    if (!enabled || loggedOut) return;
     var button = matcher.findTimeoutContinueButton(document, isElementVisible);
     var now = Date.now();
     if (!button || now - (lastClickAtByButton.get(button) || 0) < CLICK_COOLDOWN_MS) return;
@@ -137,11 +140,23 @@
     };
   }
 
+  // When this page itself loaded. The script can be injected long after that
+  // (on an extension update), and the background needs the real load time.
+  function pageLoadedAt() {
+    try {
+      var origin = typeof performance !== "undefined" ? performance.timeOrigin : null;
+      return typeof origin === "number" && Number.isFinite(origin) ? Math.round(origin) : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
   function reportPageState() {
     var state = pageState();
     report({
       type: "era-page-ready",
       at: Date.now(),
+      loadedAt: pageLoadedAt(),
       path: state.path,
       ignored: matcher.isIgnoredEraUrl(location.href),
       isLoginPage: matcher.isLoginUrl(location.href),
@@ -247,9 +262,10 @@
   }
 
   function onStorageChanged(changes, area) {
-    if (area !== "local" || !changes.enabled) return;
-    enabled = changes.enabled.newValue !== false;
-    if (enabled) lookForWarning();
+    if (area !== "local" || (!changes.enabled && !changes.sessionStatus)) return;
+    if (changes.enabled) enabled = changes.enabled.newValue !== false;
+    if (changes.sessionStatus) loggedOut = changes.sessionStatus.newValue === "logged-out";
+    if (enabled && !loggedOut) lookForWarning();
   }
 
   var instance = { alive: function () { return !stopped && contextAlive(); }, stop: stop };
@@ -258,8 +274,9 @@
 
   chrome.runtime.onMessage.addListener(onMessage);
   chrome.storage.onChanged.addListener(onStorageChanged);
-  chrome.storage.local.get({ enabled: true }).then(function (stored) {
+  chrome.storage.local.get({ enabled: true, sessionStatus: "unknown" }).then(function (stored) {
     enabled = stored.enabled !== false;
+    loggedOut = stored.sessionStatus === "logged-out";
     lookForWarning();
   }).catch(stopIfOrphaned);
 

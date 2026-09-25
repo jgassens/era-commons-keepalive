@@ -322,10 +322,93 @@
     return decideSession(results, priorStatus, cookie).status;
   }
 
+  // The reason a logout record carries when eRA's server refused two
+  // keep-alive pings in a row.
+  var SERVER_END_REASON = "eRA's server ended the session (keep-alive refused)";
+
+  function isServerEndRecord(record) {
+    return !!record && (record.serverEnded === true || record.reason === SERVER_END_REASON);
+  }
+
+  // How long the session lasted: sign-in to the estimated end when both are
+  // known, otherwise the minutes from sign-in to when the end was noticed.
+  function sessionLengthMinutes(record) {
+    if (!record) return null;
+    var start = record.sessionStartedAt;
+    var end = record.estimatedEndAt;
+    if (typeof start === "number" && typeof end === "number" && Number.isFinite(start) &&
+      Number.isFinite(end) && end >= start) return roundMinutes((end - start) / 60000);
+    return typeof record.minutesSinceSignIn === "number" && Number.isFinite(record.minutesSinceSignIn) ?
+      record.minutesSinceSignIn : null;
+  }
+
+  // "2 h 10 min", "45 min", "3 h"; null when there is no number.
+  function formatDuration(minutes) {
+    if (typeof minutes !== "number" || !Number.isFinite(minutes)) return null;
+    var whole = Math.max(0, Math.round(minutes));
+    if (whole < 60) return whole + " min";
+    var rest = whole % 60;
+    return Math.floor(whole / 60) + " h" + (rest ? " " + rest + " min" : "");
+  }
+
+  // "3:01 PM" in the viewer's own clock format.
+  function clockTime(value) {
+    var date = new Date(value);
+    if (value === null || typeof value === "undefined" || !Number.isFinite(date.getTime())) return null;
+    return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  }
+
+  // The notification shown once when eRA's server ends the session.
+  function serverEndNotification(endedAt, sessionStartedAt) {
+    var length = typeof sessionStartedAt === "number" && typeof endedAt === "number" && endedAt >= sessionStartedAt ?
+      formatDuration((endedAt - sessionStartedAt) / 60000) : null;
+    var when = clockTime(endedAt);
+    return {
+      title: "eRA ended your session — log in again",
+      message: "eRA's server stopped accepting your session" + (when ? " around " + when : "") +
+        (length ? ", about " + length + " after you signed in" : "") + "."
+    };
+  }
+
+  // The popup's status line for a server-ended session.
+  function serverEndStatus(record) {
+    var when = clockTime(isServerEndRecord(record) &&
+      typeof record.estimatedEndAt === "number" ? record.estimatedEndAt : record && record.loggedOutDetectedAt);
+    var length = formatDuration(sessionLengthMinutes(record));
+    return "eRA's server ended your session" + (when ? " at " + when : "") +
+      (length ? " — " + length + " after sign-in" : "") + ". Log in again.";
+  }
+
+  // When at least two server-ended sessions lasted within 15 minutes of each
+  // other, a sentence naming that length; otherwise null. The biggest such
+  // group wins; its average is the length named.
+  var PATTERN_WINDOW_MINUTES = 15;
+  function sessionEndPattern(records) {
+    var lengths = (Array.isArray(records) ? records : []).filter(isServerEndRecord)
+      .map(sessionLengthMinutes)
+      .filter(function (value) { return typeof value === "number" && Number.isFinite(value); })
+      .sort(function (a, b) { return a - b; });
+    var best = [];
+    for (var i = 0; i < lengths.length; i += 1) {
+      var group = lengths.filter(function (value) {
+        return value >= lengths[i] && value - lengths[i] <= PATTERN_WINDOW_MINUTES;
+      });
+      if (group.length > best.length) best = group;
+    }
+    if (best.length < 2) return null;
+    var average = best.reduce(function (sum, value) { return sum + value; }, 0) / best.length;
+    return "eRA seems to end sessions about " + formatDuration(average) + " after sign-in (seen " +
+      best.length + " times).";
+  }
+
   // The extra line the popup shows under a logout record, or null.
   function logoutNote(record) {
     if (!record) return null;
     var reason = String(record.reason || "");
+    if (isServerEndRecord(record)) {
+      return "eRA's server stopped accepting the session even though the extension kept checking in. " +
+        "eRA appears to have a fixed session limit that the extension cannot get past.";
+    }
     if (/server ended the session/i.test(reason)) {
       return "eRA's server ended this session even though its page timer was still running. Keep \"Also ping eRA's server\" on.";
     }
@@ -424,6 +507,10 @@
         (entry.to === "idle" ? "; not keeping the session alive until an eRA tab is open (4-minute timer stopped)" :
           entry.to === "logged-in" ? "; still logged in, nothing to nudge (4-minute timer stopped)" : "");
     }
+    if (entry.type === "server-refused") {
+      return prefix + "server refused keep-alive — rechecking in 30 s (" + path + ")";
+    }
+    // Written by versions before 1.5.0.
     if (entry.type === "server-warning") {
       return prefix + "server rejected keep-alive (redirect) " + path + "; eRA timer still live, still nudging";
     }
@@ -471,6 +558,14 @@
     decideSession: decideSession,
     deriveSessionStatus: deriveSessionStatus,
     logoutNote: logoutNote,
+    SERVER_END_REASON: SERVER_END_REASON,
+    isServerEndRecord: isServerEndRecord,
+    sessionLengthMinutes: sessionLengthMinutes,
+    formatDuration: formatDuration,
+    clockTime: clockTime,
+    serverEndNotification: serverEndNotification,
+    serverEndStatus: serverEndStatus,
+    sessionEndPattern: sessionEndPattern,
     roundMinutes: roundMinutes,
     formatMinutes: formatMinutes,
     formatTime: formatTime,
