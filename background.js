@@ -6,6 +6,9 @@ var matcher = globalThis.EraKeepAlive;
 var ALARM_NAME = "era-keep-alive";
 var NUDGE_PERIOD_MINUTES = 4;
 var LATE_ALARM_MS = 60 * 1000;
+// eRA rewrites its cookie on every click, key press and scroll. The stored
+// logout time is refreshed only when it moves by at least this much.
+var LOGOUT_AT_STEP_MS = 60 * 1000;
 var ERA_TAB_QUERY = { url: ["https://*.era.nih.gov/*"] };
 var CONTENT_FILES = ["src/matcher.js", "content.js"];
 var DEFAULT_STATE = {
@@ -18,9 +21,12 @@ var DEFAULT_STATE = {
   lastUserPageLoadAt: null,
   lastAutoClick: null,
   lastServerResult: null,
+  serverWarning: null,
   logoutRecords: []
 };
 var logWrite = Promise.resolve();
+var statusQueue = Promise.resolve();
+var cookieLiveCheckQueued = false;
 
 function getState() {
   return chrome.storage.local.get(DEFAULT_STATE);
@@ -28,6 +34,15 @@ function getState() {
 
 function setState(values) {
   return chrome.storage.local.set(values);
+}
+
+// Every status decision (alarm ticks, page loads, cookie changes, the on/off
+// switch) runs one at a time, so two of them can never both see logged-in
+// and both record the same logout. A failed task does not stop the queue.
+function serialized(task) {
+  var run = statusQueue.then(task);
+  statusQueue = run.catch(function () {});
+  return run;
 }
 
 function minutesBetween(from, to) {
@@ -59,6 +74,9 @@ async function updateBadge() {
   } else if (state.sessionStatus === "logged-out") {
     await chrome.action.setBadgeBackgroundColor({ color: "#b91c1c" });
     await chrome.action.setBadgeText({ text: "!" });
+  } else if (state.sessionStatus === "logged-in" && state.serverWarning) {
+    await chrome.action.setBadgeBackgroundColor({ color: "#b45309" });
+    await chrome.action.setBadgeText({ text: "ON!" });
   } else if (state.sessionStatus === "logged-in") {
     await chrome.action.setBadgeBackgroundColor({ color: "#15803d" });
     await chrome.action.setBadgeText({ text: "ON" });
@@ -73,9 +91,22 @@ async function queryEraTabs() {
   return tabs.filter(function (tab) { return !matcher.isIgnoredEraUrl(tab.url); });
 }
 
+// Reads eRA's timeout cookie straight from Chrome. null means it could not
+// be read, which is no evidence either way.
+async function readEraCookie(now) {
+  try {
+    return matcher.summarizeEraCookies(await chrome.cookies.getAll({ name: matcher.ERA_COOKIE_NAME }), now);
+  } catch (error) {
+    console.warn("eRA Keep Alive: could not read the eRA timeout cookie", error);
+    return null;
+  }
+}
+
+// After a logout the alarm stays off until an eRA page with a live timer, or
+// a fresh cookie write, sets the status back to logged-in.
 async function configureAlarm() {
   var state = await getState();
-  if (!state.enabled) {
+  if (!state.enabled || state.sessionStatus === "logged-out") {
     await chrome.alarms.clear(ALARM_NAME);
     return;
   }
@@ -131,6 +162,7 @@ function probeResult(tab, reply) {
     path: matcher.safePath(reply.path || tab.url),
     managerPresent: !!reply.managerPresent,
     minsLeftBefore: typeof reply.minsLeft === "number" ? reply.minsLeft : null,
+    disabled: !!reply.disabled,
     isLoginPage: matcher.isLoginUrl(tab.url),
     ignored: false
   };
@@ -158,7 +190,9 @@ async function nudgeTab(tab, ping) {
     serverStatus: typeof reply.serverStatus === "number" ? reply.serverStatus : null,
     serverRejected: !!reply.serverRejected,
     serverError: !!reply.serverError,
+    serverTimeout: !!reply.serverTimeout,
     serverRedirectedToLogin: !!reply.serverRedirectedToLogin,
+    disabled: !!reply.disabled,
     isLoginPage: matcher.isLoginUrl(tab.url),
     ignored: false
   };
@@ -178,86 +212,67 @@ function nudgeLogEntry(result, at) {
     serverStatus: typeof result.serverStatus === "number" ? result.serverStatus : null,
     serverRejected: !!result.serverRejected,
     serverError: !!result.serverError,
+    serverTimeout: !!result.serverTimeout,
     serverRedirectedToLogin: !!result.serverRedirectedToLogin
   };
 }
 
-function transitionExplanation(status, explained) {
-  var wanted = status === "logged-in" ? "active" : status === "logged-out" ? "ended" : null;
-  var match = wanted && explained.find(function (item) { return item.classification === wanted; });
-  if (match) return { reason: match.reason, path: match.result.path };
-  if (explained.length && explained.every(function (item) { return item.result.unreachable; })) {
-    return { reason: "could not reach any eRA tab", path: null };
-  }
-  return { reason: "no tab shows a live eRA timer", path: null };
+function logoutRecord(prior, detail, at) {
+  var sessionStartedAt = prior.sessionStartedAt;
+  var lastNudgeAt = typeof prior.lastNudgeAt === "number" &&
+    (typeof sessionStartedAt !== "number" || prior.lastNudgeAt >= sessionStartedAt) ? prior.lastNudgeAt : null;
+  return {
+    loggedOutDetectedAt: at,
+    reason: detail.reason,
+    path: detail.path,
+    pingServer: !!prior.pingServer,
+    sessionStartedAt: sessionStartedAt,
+    minutesSinceSignIn: minutesBetween(sessionStartedAt, at),
+    lastNudgeAt: lastNudgeAt,
+    minutesSinceLastNudge: minutesBetween(lastNudgeAt, at),
+    lastUserPageLoadAt: prior.lastUserPageLoadAt,
+    minutesSinceLastPageLoad: minutesBetween(prior.lastUserPageLoadAt, at),
+    minutesLeftAtLastNudge: lastNudgeAt === null || typeof prior.eraLogoutAt !== "number" ? null :
+      matcher.roundMinutes((prior.eraLogoutAt - lastNudgeAt) / 60000),
+    lastServerPing: prior.lastServerResult
+  };
 }
 
-// The same transition logic serves alarms and page loads. options.nudged is
-// true only when the results came from a nudge (so they carry a fresh cookie).
-async function applyResults(results, at, options) {
-  options = options || {};
-  var prior = await getState();
+// The one code path for every status change, whatever noticed it. Callers
+// run inside serialized(). next is { status, reason, path }.
+async function commitStatus(prior, next, at, updates) {
   var priorStatus = prior.sessionStatus;
-  var explained = results.filter(function (result) { return !result.ignored; }).map(function (result) {
-    var explanation = matcher.explainTabResult(result, priorStatus);
-    return { result: result, classification: explanation.classification, reason: explanation.reason };
-  });
-  var nextStatus = matcher.deriveSessionStatus(results, priorStatus);
-  var updates = { sessionStatus: nextStatus };
-  var active = explained.find(function (item) { return item.classification === "active"; });
-
-  if (options.nudged) {
-    if (active) {
-      updates.lastNudgeAt = at;
-      updates.eraLogoutAt = active.result.logoutAtAfter;
-      var pinged = results.find(function (result) { return result.serverCalled; });
-      updates.lastServerResult = matcher.describeServer(pinged || { pingServer: !!prior.pingServer });
-    } else {
-      updates.eraLogoutAt = null;
-    }
+  var nextStatus = next.status;
+  updates = Object.assign({}, updates, { sessionStatus: nextStatus });
+  if (nextStatus === "logged-out") {
+    updates.eraLogoutAt = null;
+    updates.serverWarning = null;
   }
-  if (nextStatus === "logged-out") updates.eraLogoutAt = null;
-  if (nextStatus === "logged-in" && priorStatus !== "logged-in") updates.sessionStartedAt = at;
+  if (nextStatus === "logged-in" && priorStatus !== "logged-in") {
+    updates.sessionStartedAt = at;
+    if (!("serverWarning" in updates)) updates.serverWarning = null;
+  }
 
-  var detail = transitionExplanation(nextStatus, explained);
   if (priorStatus !== nextStatus) {
     await appendDiagnosticEntries([{
       type: "status",
       at: at,
       from: priorStatus,
       to: nextStatus,
-      reason: detail.reason,
-      path: detail.path
+      reason: next.reason || "status changed",
+      path: next.path || null
     }]);
   }
 
   // The logout record and the notification share this one condition.
   var sessionEnded = priorStatus === "logged-in" && nextStatus === "logged-out";
   if (sessionEnded) {
-    var sessionStartedAt = prior.sessionStartedAt;
-    var lastNudgeAt = typeof prior.lastNudgeAt === "number" &&
-      (typeof sessionStartedAt !== "number" || prior.lastNudgeAt >= sessionStartedAt) ? prior.lastNudgeAt : null;
-    var record = {
-      loggedOutDetectedAt: at,
-      reason: detail.reason,
-      path: detail.path,
-      pingServer: !!prior.pingServer,
-      sessionStartedAt: sessionStartedAt,
-      minutesSinceSignIn: minutesBetween(sessionStartedAt, at),
-      lastNudgeAt: lastNudgeAt,
-      minutesSinceLastNudge: minutesBetween(lastNudgeAt, at),
-      lastUserPageLoadAt: prior.lastUserPageLoadAt,
-      minutesSinceLastPageLoad: minutesBetween(prior.lastUserPageLoadAt, at),
-      minutesLeftAtLastNudge: lastNudgeAt === null || typeof prior.eraLogoutAt !== "number" ? null :
-        matcher.roundMinutes((prior.eraLogoutAt - lastNudgeAt) / 60000),
-      lastServerPing: prior.lastServerResult
-    };
-    updates.logoutRecords = [record].concat(prior.logoutRecords || []).slice(0, 10);
+    updates.logoutRecords = [logoutRecord(prior, next, at)].concat(prior.logoutRecords || []).slice(0, 10);
   }
 
   await setState(updates);
   await updateBadge();
-  if (nextStatus === "logged-out") await chrome.alarms.clear(ALARM_NAME);
+  if (priorStatus !== nextStatus || nextStatus === "logged-out") await configureAlarm();
   if (sessionEnded) {
     await chrome.notifications.create("era-session-ended", {
       type: "basic",
@@ -269,15 +284,80 @@ async function applyResults(results, at, options) {
   return nextStatus;
 }
 
+// Alarms and page loads both land here. options.nudged is true only when the
+// results came from a nudge (so they carry a fresh cookie and server answer);
+// options.cookie is the cookie read straight from Chrome, when there is one.
+async function applyResults(results, at, options) {
+  options = options || {};
+  var prior = await getState();
+  var decision = matcher.decideSession(results, prior.sessionStatus, options.cookie);
+  var updates = {};
+  var cookie = options.cookie;
+
+  if (options.nudged) {
+    var active = results.find(function (result) {
+      return matcher.classifyTabResult(result, prior.sessionStatus) === "active";
+    });
+    if (active) {
+      updates.lastNudgeAt = at;
+      updates.eraLogoutAt = active.logoutAtAfter;
+      var pinged = results.find(function (result) { return result.serverCalled; });
+      updates.lastServerResult = matcher.describeServer(pinged || { pingServer: !!prior.pingServer });
+    } else if (cookie) {
+      updates.eraLogoutAt = cookie.state === "live" ? cookie.logoutAt : null;
+    }
+
+    var rejected = results.find(function (result) { return result.serverRejected || result.serverRedirectedToLogin; });
+    var answered = results.some(function (result) {
+      return result.serverCalled && typeof result.serverStatus === "number" && !result.serverRejected;
+    });
+    if (rejected && decision.status === "logged-in") {
+      // eRA's timer is still live, so this is a warning, not a logout.
+      updates.serverWarning = { at: at, path: rejected.path };
+      await appendDiagnosticEntries([{ type: "server-warning", at: at, path: rejected.path }]);
+    } else if (answered) {
+      updates.serverWarning = null;
+    }
+  }
+  return commitStatus(prior, decision, at, updates);
+}
+
+// With no eRA tab open there is nothing to nudge, so the alarm stops, but
+// the cookie still says whether the session is alive.
 async function handleNoTabs(state, at, entries) {
-  entries.push({ type: "no-tabs", at: at, from: state.sessionStatus });
+  var cookie = await readEraCookie(at);
+  var priorStatus = state.sessionStatus;
+  var next;
+  if (!cookie) {
+    next = { status: priorStatus };
+  } else if (cookie.state === "live") {
+    next = priorStatus === "logged-out" ? { status: "unknown", reason: "no eRA tabs open" } :
+      { status: "logged-in", reason: "live eRA timer cookie" };
+  } else if (priorStatus === "logged-in") {
+    next = matcher.decideSession([], priorStatus, cookie);
+  } else {
+    next = { status: "unknown", reason: "no eRA tabs open" };
+  }
+  entries.push({
+    type: "no-tabs",
+    at: at,
+    from: priorStatus,
+    to: next.status,
+    cookie: cookie ? cookie.state : null,
+    minsLeft: cookie ? matcher.roundMinutes(cookie.minsLeft) : null
+  });
   await appendDiagnosticEntries(entries);
-  await setState({ sessionStatus: "unknown", eraLogoutAt: null });
-  await updateBadge();
+  var updates = {};
+  if (cookie) updates.eraLogoutAt = cookie.state === "live" ? cookie.logoutAt : null;
+  await commitStatus(state, next, at, updates);
   await chrome.alarms.clear(ALARM_NAME);
 }
 
-async function nudgeEraTabs(alarm) {
+function nudgeEraTabs(alarm) {
+  return serialized(function () { return runTick(alarm); });
+}
+
+async function runTick(alarm) {
   try {
     var state = await getState();
     if (!state.enabled) return;
@@ -312,7 +392,7 @@ async function nudgeEraTabs(alarm) {
       entries.push(nudgeLogEntry(result, at));
     });
     await appendDiagnosticEntries(entries);
-    await applyResults(results, at, { nudged: true });
+    await applyResults(results, at, { nudged: true, cookie: await readEraCookie(Date.now()) });
   } catch (error) {
     console.warn("eRA Keep Alive: nudge failed", error);
   }
@@ -343,16 +423,60 @@ async function handlePageReady(message, sender) {
 
   var classification = matcher.classifyTabResult(result, state.sessionStatus);
   if (classification === "active") {
-    await applyResults([result], at, { nudged: false });
+    await applyResults([result], at);
   } else if (classification === "ended") {
-    // Judge by every open eRA tab, as an alarm would, but trust this page's
-    // own report for its tab: it may already have left eRA.
+    // Judge by every open eRA tab and the cookie, as an alarm would, but
+    // trust this page's own report for its tab: it may already have left eRA.
     var others = (await probeTabs(await queryEraTabs())).map(function (probe) { return probe.result; })
       .filter(function (other) { return result.tabId === null || other.tabId !== result.tabId; });
-    var status = await applyResults([result].concat(others), at, { nudged: false });
-    if (status === "logged-out") return;
+    await applyResults([result].concat(others), at, { cookie: await readEraCookie(Date.now()) });
   }
   if (!result.isLoginPage) await configureAlarm();
+}
+
+// A cookie event is only a trigger: the cookie is read again from Chrome
+// inside the queue, so a removal that was immediately replaced ends nothing.
+async function handleCookieChange(change) {
+  var state = await getState();
+  if (!state.enabled) return;
+  var at = Date.now();
+  var cookie = await readEraCookie(at);
+  if (!cookie) return;
+  if (cookie.state === "live") {
+    if (change.kind !== "live") return;
+    if (state.sessionStatus !== "logged-in") {
+      await commitStatus(state, { status: "logged-in", reason: "eRA timer cookie set", path: null }, at,
+        { eraLogoutAt: cookie.logoutAt });
+    } else if (typeof state.eraLogoutAt !== "number" ||
+      Math.abs(cookie.logoutAt - state.eraLogoutAt) >= LOGOUT_AT_STEP_MS) {
+      await setState({ eraLogoutAt: cookie.logoutAt });
+      await updateBadge();
+    }
+    return;
+  }
+  if (change.kind !== "ended" || state.sessionStatus === "logged-out") return;
+  await commitStatus(state, {
+    status: "logged-out",
+    reason: cookie.state === "expired" ? "eRA timer cookie expired" : change.reason,
+    path: null
+  }, at, {});
+}
+
+// eRA rewrites the cookie on every bit of activity, so a burst of "live"
+// events shares one queued check.
+function onCookieChanged(changeInfo) {
+  var change = matcher.classifyCookieChange(changeInfo, Date.now());
+  if (change.kind === "ignore") return Promise.resolve();
+  if (change.kind === "live") {
+    if (cookieLiveCheckQueued) return Promise.resolve();
+    cookieLiveCheckQueued = true;
+  }
+  return serialized(function () {
+    if (change.kind === "live") cookieLiveCheckQueued = false;
+    return handleCookieChange(change);
+  }).catch(function (error) {
+    console.warn("eRA Keep Alive: could not handle a cookie change", error);
+  });
 }
 
 function handleMessage(message, sender) {
@@ -366,7 +490,9 @@ function handleMessage(message, sender) {
       await appendDiagnosticEntries([{ type: "auto-click", at: clickAt, path: matcher.safePath(message.path) }]);
     })();
   }
-  if (message.type === "era-page-ready") return handlePageReady(message, sender);
+  if (message.type === "era-page-ready") {
+    return serialized(function () { return handlePageReady(message, sender); });
+  }
   return Promise.resolve();
 }
 
@@ -422,9 +548,11 @@ chrome.runtime.onMessage.addListener(function (message, sender) {
   });
 });
 
+chrome.cookies.onChanged.addListener(onCookieChanged);
+
 chrome.storage.onChanged.addListener(function (changes, area) {
   if (area !== "local" || !changes.enabled) return;
-  handleEnabledChange(changes.enabled.newValue).catch(function (error) {
+  serialized(function () { return handleEnabledChange(changes.enabled.newValue); }).catch(function (error) {
     console.warn("eRA Keep Alive: could not apply the on/off switch", error);
   });
 });

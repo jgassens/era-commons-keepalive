@@ -27,8 +27,10 @@ function listenerSlot() {
 }
 
 // A fake eRA tab. `page` mimics what content.js would see and do:
-//   managerPresent, logoutAt (ms or null), keepAliveUrl, server ("ok" | "redirect" | "error"),
+//   managerPresent, logoutAt (ms or null), keepAliveUrl,
+//   server ("ok" | "redirect" | "error" | "timeout"), disabled (content script switched off),
 //   unreachable (sendMessage throws, like a tab with no live content script).
+// A successful nudge also rewrites the shared cookie jar, as eRA's page would.
 function eraTab(id, url, page) {
   page = Object.assign({ managerPresent: false, logoutAt: null, keepAliveUrl: null, server: "ok" }, page);
   return { id: id, url: url, page: page, pings: 0, nudges: 0 };
@@ -40,8 +42,34 @@ function makeFake(options) {
   var alarms = {};
   var tabs = options.tabs || [];
   var calls = { notifications: [], executeScript: [], badgeText: [], sent: [] };
-  var failures = { get: 0, setDiagnosticLog: 0 };
+  var failures = { get: 0, setDiagnosticLog: 0, cookies: 0 };
   var onChanged = listenerSlot();
+  var onCookieChanged = listenerSlot();
+  var jar = [];
+
+  function eraCookie(value) {
+    return { name: "ERA_SESSION_TIMEOUT_COOKIE", value: String(value), domain: ".era.nih.gov", path: "/" };
+  }
+  function fireCookie(info) {
+    return Promise.all(onCookieChanged.listeners.map(function (fn) { return fn(clone(info)); }));
+  }
+  // Like Chrome: a rewrite is a removal with cause "overwrite", then a set.
+  function setEraCookie(value) {
+    var events = [];
+    var old = jar.shift();
+    if (old) events.push({ removed: true, cause: "overwrite", cookie: old });
+    var fresh = eraCookie(value);
+    jar.push(fresh);
+    events.push({ removed: false, cause: "explicit", cookie: fresh });
+    return Promise.all(events.map(fireCookie));
+  }
+  // eRA's createCookie(name, '', -1) is reported as "expired_overwrite".
+  function deleteEraCookie(cause) {
+    var old = jar.shift();
+    if (!old) return Promise.resolve();
+    return fireCookie({ removed: true, cause: cause || "expired_overwrite", cookie: old });
+  }
+  if (typeof options.cookie === "number") jar.push(eraCookie(options.cookie));
 
   function reply(tab, message) {
     var page = tab.page;
@@ -49,7 +77,7 @@ function makeFake(options) {
     var minsLeft = typeof page.logoutAt === "number" ? (page.logoutAt - now) / MINUTE : null;
     var urlPath = new URL(tab.url).pathname;
     if (message.type === "probe") {
-      return { path: urlPath, managerPresent: page.managerPresent, logoutAt: page.logoutAt, minsLeft: minsLeft, keepAliveUrl: page.keepAliveUrl };
+      return { path: urlPath, managerPresent: page.managerPresent, logoutAt: page.logoutAt, minsLeft: minsLeft, keepAliveUrl: page.keepAliveUrl, disabled: !!page.disabled };
     }
     var result = {
       path: urlPath,
@@ -60,11 +88,14 @@ function makeFake(options) {
       serverCalled: false,
       serverStatus: null,
       serverRejected: false,
-      serverError: false
+      serverError: false,
+      serverTimeout: false,
+      disabled: !!page.disabled
     };
-    if (!page.managerPresent || minsLeft === null || minsLeft <= 0) return result;
+    if (page.disabled || !page.managerPresent || minsLeft === null || minsLeft <= 0) return result;
     tab.nudges += 1;
     page.logoutAt = now + 45 * MINUTE;
+    setEraCookie(page.logoutAt);
     result.logoutAtAfter = page.logoutAt;
     result.minsLeftAfter = 45;
     if (message.ping && page.keepAliveUrl) {
@@ -72,6 +103,7 @@ function makeFake(options) {
       result.serverCalled = true;
       if (page.server === "redirect") result.serverRejected = true;
       else if (page.server === "error") result.serverError = true;
+      else if (page.server === "timeout") result.serverTimeout = true;
       else result.serverStatus = 200;
     }
     return result;
@@ -132,6 +164,19 @@ function makeFake(options) {
       setBadgeBackgroundColor: async function () {}
     },
     notifications: { create: async function (id, details) { calls.notifications.push(details); } },
+    cookies: {
+      getAll: async function (details) {
+        if (failures.cookies > 0) {
+          failures.cookies -= 1;
+          throw new Error("cookies unavailable");
+        }
+        return clone(jar.filter(function (cookie) { return !details.name || cookie.name === details.name; }));
+      },
+      get: async function (details) {
+        return clone(jar.find(function (cookie) { return cookie.name === details.name; }) || null);
+      },
+      onChanged: onCookieChanged
+    },
     scripting: {
       executeScript: async function (details) {
         calls.executeScript.push(details);
@@ -153,7 +198,12 @@ function makeFake(options) {
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(ROOT, "background.js"), "utf8"), context, { filename: "background.js" });
 
-  return { bg: context, chrome: chrome, store: store, alarms: alarms, tabs: tabs, calls: calls, failures: failures };
+  return {
+    bg: context, chrome: chrome, store: store, alarms: alarms, tabs: tabs, calls: calls, failures: failures,
+    jar: jar, setEraCookie: setEraCookie, deleteEraCookie: deleteEraCookie,
+    // Resolves once every status task queued so far has run.
+    drain: function () { return context.serialized(function () {}); }
+  };
 }
 
 async function settle() {
@@ -240,15 +290,50 @@ test("a deleted cookie after logged-in means logged-out", async function () {
   assert.ok(logLines(fake).some(function (line) { return line.endsWith("cookie deleted, server not called (ping off)"); }));
 });
 
-test("with no eRA tabs the status becomes unknown and the alarm is cleared", async function () {
-  var fake = makeFake({ storage: { sessionStatus: "logged-in", eraLogoutAt: Date.now() + MINUTE }, tabs: [eraTab(9, "https://www.era.nih.gov/news")] });
+test("no eRA tabs but a live cookie keeps logged-in and stops the alarm", async function () {
+  var logoutAt = Date.now() + 30 * MINUTE;
+  var fake = makeFake({
+    storage: { sessionStatus: "logged-in", sessionStartedAt: 5 },
+    cookie: logoutAt,
+    tabs: [eraTab(9, "https://www.era.nih.gov/news")]
+  });
   fake.alarms["era-keep-alive"] = { name: "era-keep-alive", periodInMinutes: 4 };
   await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
-  assert.equal(fake.store.sessionStatus, "unknown");
-  assert.equal(fake.store.eraLogoutAt, null);
+  assert.equal(fake.store.sessionStatus, "logged-in");
+  assert.equal(fake.store.sessionStartedAt, 5);
+  assert.equal(fake.store.eraLogoutAt, logoutAt);
   assert.equal(fake.alarms["era-keep-alive"], undefined);
-  assert.ok(logLines(fake).some(function (line) { return line.includes("no eRA tabs open"); }));
+  assert.equal(fake.calls.notifications.length, 0);
   assert.equal(fake.calls.sent.length, 0);
+  assert.ok(logLines(fake).some(function (line) {
+    return /no eRA tabs open, cookie 30\.0 min; still logged in, nothing to nudge \(4-minute timer stopped\)$/.test(line);
+  }), logLines(fake).join("\n"));
+});
+
+test("no eRA tabs and no cookie after logged-in records the logout", async function () {
+  var fake = makeFake({
+    storage: { sessionStatus: "logged-in", sessionStartedAt: Date.now() - 20 * MINUTE, eraLogoutAt: Date.now() + MINUTE },
+    tabs: []
+  });
+  fake.alarms["era-keep-alive"] = { name: "era-keep-alive", periodInMinutes: 4 };
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  assert.equal(fake.store.sessionStatus, "logged-out");
+  assert.equal(fake.store.eraLogoutAt, null);
+  assert.equal(fake.store.logoutRecords.length, 1);
+  assert.equal(fake.store.logoutRecords[0].reason, "eRA timer cookie deleted");
+  assert.equal(fake.calls.notifications.length, 1);
+  assert.equal(fake.alarms["era-keep-alive"], undefined);
+  assert.ok(logLines(fake).some(function (line) { return line.endsWith("no eRA tabs open, cookie deleted"); }));
+});
+
+test("no eRA tabs and no cookie from unknown or logged-out goes to unknown without a record", async function () {
+  for (var prior of ["unknown", "logged-out"]) {
+    var fake = makeFake({ storage: { sessionStatus: prior }, tabs: [] });
+    await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+    assert.equal(fake.store.sessionStatus, "unknown");
+    assert.equal((fake.store.logoutRecords || []).length, 0);
+    assert.equal(fake.calls.notifications.length, 0);
+  }
 });
 
 test("while disabled, page loads are not logged and tabs are not nudged", async function () {
@@ -291,17 +376,42 @@ test("the server is pinged only when the switch is on, once per keep-alive URL",
   assert.ok(logLines(on).some(function (line) { return line.endsWith("server 200"); }));
 });
 
-test("a keep-alive redirect counts as server rejected and ends the session", async function () {
+test("a keep-alive redirect with a live cookie warns but keeps the session and the alarm", async function () {
   var fake = makeFake({
-    storage: { sessionStatus: "logged-in", pingServer: true },
+    storage: { sessionStatus: "logged-in", pingServer: true, sessionStartedAt: 7 },
     tabs: [eraTab(1, HOME, liveManager({ keepAliveUrl: ALIVE_URL, server: "redirect" }))]
   });
+  fake.alarms["era-keep-alive"] = { name: "era-keep-alive", periodInMinutes: 4 };
   await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
-  assert.equal(fake.store.sessionStatus, "logged-out");
-  assert.equal(fake.store.logoutRecords[0].reason, "server rejected keep-alive (redirect)");
-  assert.equal(fake.store.logoutRecords[0].pingServer, true);
-  assert.equal(fake.calls.notifications.length, 1);
-  assert.ok(logLines(fake).some(function (line) { return line.endsWith("server rejected (redirect)"); }));
+  await fake.drain();
+  assert.equal(fake.store.sessionStatus, "logged-in");
+  assert.equal(fake.store.sessionStartedAt, 7);
+  assert.equal((fake.store.logoutRecords || []).length, 0);
+  assert.equal(fake.calls.notifications.length, 0);
+  assert.ok(fake.alarms["era-keep-alive"]);
+  assert.ok(fake.store.serverWarning);
+  assert.equal(fake.calls.badgeText[fake.calls.badgeText.length - 1], "ON!");
+  var lines = logLines(fake);
+  assert.ok(lines.some(function (line) { return line.endsWith("server rejected (redirect)"); }), lines.join("\n"));
+  assert.ok(lines.some(function (line) { return /server rejected keep-alive \(redirect\) \/commonsplus\/home\.era; eRA timer still live, still nudging$/.test(line); }));
+
+  // The next tick nudges again; a normal answer clears the warning.
+  fake.tabs[0].page.server = "ok";
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  assert.equal(fake.tabs[0].nudges, 2);
+  assert.equal(fake.store.serverWarning, null);
+  assert.equal(fake.calls.badgeText[fake.calls.badgeText.length - 1], "ON");
+});
+
+test("a server timeout is logged and keeps the session", async function () {
+  var fake = makeFake({
+    storage: { sessionStatus: "logged-in", pingServer: true },
+    tabs: [eraTab(1, HOME, liveManager({ keepAliveUrl: ALIVE_URL, server: "timeout" }))]
+  });
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  assert.equal(fake.store.sessionStatus, "logged-in");
+  assert.equal(fake.store.lastServerResult, "server timeout");
+  assert.ok(logLines(fake).some(function (line) { return line.endsWith("server timeout"); }));
 });
 
 test("a server error is logged but does not end the session", async function () {
@@ -383,4 +493,173 @@ test("the post-nudge logout time comes straight from the cookie", async function
   var fake = makeFake({ storage: { sessionStatus: "logged-in" }, tabs: [eraTab(1, HOME, liveManager())] });
   await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
   assert.equal(fake.store.eraLogoutAt, fake.tabs[0].page.logoutAt);
+});
+
+test("eRA deleting its cookie while logged-in ends the session at once, with one record and one notification", async function () {
+  var fake = makeFake({
+    storage: { sessionStatus: "logged-in", sessionStartedAt: Date.now() - 50 * MINUTE },
+    cookie: Date.now() + 40 * MINUTE,
+    tabs: [eraTab(1, HOME, liveManager())]
+  });
+  fake.alarms["era-keep-alive"] = { name: "era-keep-alive", periodInMinutes: 4 };
+  await fake.deleteEraCookie("expired_overwrite");
+  await fake.drain();
+  assert.equal(fake.store.sessionStatus, "logged-out");
+  assert.equal(fake.store.logoutRecords.length, 1);
+  assert.equal(fake.store.logoutRecords[0].reason, "eRA timer cookie deleted");
+  assert.equal(fake.store.logoutRecords[0].minutesSinceSignIn, 50);
+  assert.equal(fake.calls.notifications.length, 1);
+  assert.equal(fake.alarms["era-keep-alive"], undefined);
+  assert.equal(fake.calls.sent.length, 0);
+  assert.ok(logLines(fake).some(function (line) { return line.endsWith("status logged-in -> logged-out: eRA timer cookie deleted"); }));
+});
+
+test("an explicit cookie removal ends the session; an 'expired' one says so", async function () {
+  var explicit = makeFake({ storage: { sessionStatus: "logged-in" }, cookie: Date.now() + 10 * MINUTE, tabs: [] });
+  await explicit.deleteEraCookie("explicit");
+  await explicit.drain();
+  assert.equal(explicit.store.logoutRecords[0].reason, "eRA timer cookie deleted");
+  assert.equal(explicit.calls.notifications.length, 1);
+
+  var expired = makeFake({ storage: { sessionStatus: "logged-in" }, cookie: Date.now() + 10 * MINUTE, tabs: [] });
+  await expired.deleteEraCookie("expired");
+  await expired.drain();
+  assert.equal(expired.store.logoutRecords[0].reason, "eRA timer cookie expired");
+});
+
+test("a cookie rewrite (overwrite) is not a logout", async function () {
+  var first = Date.now() + 30 * MINUTE;
+  var fake = makeFake({
+    storage: { sessionStatus: "logged-in", sessionStartedAt: 3, eraLogoutAt: first },
+    cookie: first,
+    tabs: [eraTab(1, HOME, liveManager())]
+  });
+  var later = Date.now() + 45 * MINUTE;
+  await fake.setEraCookie(later);
+  await fake.drain();
+  assert.equal(fake.store.sessionStatus, "logged-in");
+  assert.equal(fake.store.sessionStartedAt, 3);
+  assert.equal((fake.store.logoutRecords || []).length, 0);
+  assert.equal(fake.calls.notifications.length, 0);
+  assert.equal(fake.store.eraLogoutAt, later);
+});
+
+test("a removal that is immediately replaced by a live cookie ends nothing", async function () {
+  var fake = makeFake({ storage: { sessionStatus: "logged-in" }, cookie: Date.now() + 30 * MINUTE, tabs: [] });
+  var removal = fake.deleteEraCookie("explicit");
+  fake.jar.push({ name: "ERA_SESSION_TIMEOUT_COOKIE", value: String(Date.now() + 44 * MINUTE), domain: ".era.nih.gov", path: "/" });
+  await removal;
+  await fake.drain();
+  assert.equal(fake.store.sessionStatus, "logged-in");
+  assert.equal(fake.calls.notifications.length, 0);
+});
+
+test("a fresh cookie write after a logout sets logged-in and re-arms the alarm", async function () {
+  var fake = makeFake({ storage: { sessionStatus: "logged-out" }, tabs: [eraTab(1, HOME, liveManager())] });
+  var at = Date.now();
+  var logoutAt = at + 45 * MINUTE;
+  await fake.setEraCookie(logoutAt);
+  await fake.drain();
+  assert.equal(fake.store.sessionStatus, "logged-in");
+  assert.ok(fake.store.sessionStartedAt >= at);
+  assert.equal(fake.store.eraLogoutAt, logoutAt);
+  assert.equal(fake.calls.badgeText[fake.calls.badgeText.length - 1], "ON");
+  assert.ok(fake.alarms["era-keep-alive"]);
+});
+
+test("cookies from other sites and cookie events while disabled are ignored", async function () {
+  var fake = makeFake({ storage: { sessionStatus: "logged-in", enabled: false }, cookie: Date.now() + 30 * MINUTE, tabs: [] });
+  await fake.deleteEraCookie("explicit");
+  fake.chrome.cookies.onChanged.listeners.forEach(function (fn) {
+    fn({ removed: true, cause: "explicit", cookie: { name: "ERA_SESSION_TIMEOUT_COOKIE", value: "1", domain: ".example.com" } });
+  });
+  await fake.drain();
+  assert.equal(fake.store.sessionStatus, "logged-in");
+  assert.equal(fake.calls.notifications.length, 0);
+});
+
+test("a tick with only unreachable tabs keeps logged-in, and a later real logout is still recorded", async function () {
+  var startedAt = Date.now() - 60 * MINUTE;
+  var fake = makeFake({
+    storage: { sessionStatus: "logged-in", sessionStartedAt: startedAt },
+    cookie: Date.now() + 30 * MINUTE,
+    tabs: [eraTab(1, HOME, { unreachable: true })]
+  });
+  // Cookie unreadable too: nothing but neutral evidence.
+  fake.failures.cookies = 1;
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  assert.equal(fake.store.sessionStatus, "logged-in");
+  assert.equal(fake.store.sessionStartedAt, startedAt);
+
+  // Unreachable tab, cookie readable and live: still logged in.
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  assert.equal(fake.store.sessionStatus, "logged-in");
+  assert.equal(fake.store.sessionStartedAt, startedAt);
+
+  await fake.deleteEraCookie();
+  await fake.drain();
+  assert.equal(fake.store.sessionStatus, "logged-out");
+  assert.equal(fake.store.logoutRecords.length, 1);
+  assert.equal(fake.store.logoutRecords[0].minutesSinceSignIn, 60);
+  assert.equal(fake.calls.notifications.length, 1);
+});
+
+test("an unreachable tab sitting on eRA's logout URL counts as a logout", async function () {
+  var fake = makeFake({
+    storage: { sessionStatus: "logged-in" },
+    cookie: Date.now() + 30 * MINUTE,
+    tabs: [eraTab(1, "https://public.era.nih.gov/commons/authi/public/do?action=logout", { unreachable: true })]
+  });
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  assert.equal(fake.store.sessionStatus, "logged-out");
+  assert.equal(fake.store.logoutRecords[0].reason, "login or logout page");
+});
+
+test("a tab whose content script is switched off is neither nudged, pinged nor counted", async function () {
+  var fake = makeFake({
+    storage: { sessionStatus: "unknown", pingServer: true },
+    tabs: [eraTab(1, HOME, liveManager({ keepAliveUrl: ALIVE_URL, disabled: true }))]
+  });
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  assert.equal(fake.tabs[0].nudges, 0);
+  assert.equal(fake.tabs[0].pings, 0);
+  assert.equal(fake.store.sessionStatus, "unknown");
+});
+
+test("after a logout, a page without eRA's timer does not restart the alarm; a live one does", async function () {
+  var fake = makeFake({ storage: { sessionStatus: "logged-out" }, tabs: [eraTab(1, HOME)] });
+  await fake.bg.handleMessage(pageReady({ path: "/commonsplus/help.era", managerPresent: false, minsLeft: null }), { tab: { id: 1 } });
+  assert.equal(fake.alarms["era-keep-alive"], undefined);
+  await fake.bg.handleMessage(pageReady({ managerPresent: true, minsLeft: 44 }), { tab: { id: 1 } });
+  assert.equal(fake.store.sessionStatus, "logged-in");
+  assert.ok(fake.alarms["era-keep-alive"]);
+});
+
+test("a cookie deletion, a login page load and a tick at the same moment notify once", async function () {
+  var fake = makeFake({
+    storage: { sessionStatus: "logged-in" },
+    cookie: Date.now() + 30 * MINUTE,
+    tabs: [eraTab(1, LOGIN), eraTab(2, HOME, { managerPresent: true, logoutAt: null })]
+  });
+  var removed = fake.jar[0];
+  fake.jar.length = 0;
+  function removal(cause) {
+    return Promise.all(fake.chrome.cookies.onChanged.listeners.map(function (fn) {
+      return fn({ removed: true, cause: cause, cookie: removed });
+    }));
+  }
+  // Two eRA tabs each delete the cookie as they log out, while a page load
+  // and an alarm tick land at the same moment.
+  await Promise.all([
+    removal("expired_overwrite"),
+    removal("explicit"),
+    fake.bg.handleMessage(pageReady({ path: "/commonsplus/public/login.era", isLoginPage: true, managerPresent: false, minsLeft: null }), { tab: { id: 1 } }),
+    fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() })
+  ]);
+  await fake.drain();
+  assert.equal(fake.store.sessionStatus, "logged-out");
+  assert.equal(fake.store.logoutRecords.length, 1);
+  assert.equal(fake.calls.notifications.length, 1);
+  var statusLines = logLines(fake).filter(function (line) { return line.includes("status logged-in -> logged-out"); });
+  assert.equal(statusLines.length, 1);
 });

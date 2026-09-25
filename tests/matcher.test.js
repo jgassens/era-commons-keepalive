@@ -137,9 +137,15 @@ test("classifies each tab result as active, ended or neutral", function () {
   assert.equal(matcher.classifyTabResult(live, "unknown"), "active");
   assert.equal(matcher.classifyTabResult({ ...live, ignored: true }, "logged-in"), "neutral");
   assert.equal(matcher.classifyTabResult({ unreachable: true, isLoginPage: false }, "logged-in"), "neutral");
+  // An unreachable tab is still judged by its URL.
+  assert.equal(matcher.classifyTabResult({ unreachable: true, isLoginPage: true }, "logged-in"), "ended");
+  assert.equal(matcher.classifyTabResult({ ...live, disabled: true }, "logged-in"), "neutral");
   assert.equal(matcher.classifyTabResult({ isLoginPage: true }, "unknown"), "ended");
-  assert.equal(matcher.classifyTabResult({ ...live, serverRedirectedToLogin: true }, "unknown"), "ended");
-  assert.equal(matcher.classifyTabResult({ ...live, serverRejected: true }, "unknown"), "ended");
+  // A rejected keep-alive does not end a session whose timer is live...
+  assert.equal(matcher.classifyTabResult({ ...live, serverRedirectedToLogin: true }, "unknown"), "active");
+  assert.equal(matcher.classifyTabResult({ ...live, serverRejected: true }, "logged-in"), "active");
+  // ...only one whose cookie is gone too.
+  assert.equal(matcher.classifyTabResult({ managerPresent: true, minsLeftBefore: null, serverRejected: true }, "unknown"), "ended");
   // A missing or expired cookie ends the session only after it was seen live.
   assert.equal(matcher.classifyTabResult({ managerPresent: true, minsLeftBefore: null }, "logged-in"), "ended");
   assert.equal(matcher.classifyTabResult({ managerPresent: false, minsLeftBefore: -2 }, "logged-in"), "ended");
@@ -158,11 +164,14 @@ test("derives session status across all relevant tab results", function () {
   assert.equal(matcher.deriveSessionStatus([expired, active], "logged-in"), "logged-in");
   assert.equal(matcher.deriveSessionStatus([expired, login], "unknown"), "logged-out");
   assert.equal(matcher.deriveSessionStatus([{ unreachable: true }, login], "logged-in"), "logged-out");
-  assert.equal(matcher.deriveSessionStatus([{ ...active, serverRejected: true }], "logged-in"), "logged-out");
+  assert.equal(matcher.deriveSessionStatus([{ ...active, serverRejected: true }], "logged-in"), "logged-in");
   assert.equal(matcher.deriveSessionStatus([expired], "logged-in"), "logged-out");
   assert.equal(matcher.deriveSessionStatus([expired], "unknown"), "unknown");
   assert.equal(matcher.deriveSessionStatus([neutral, { unreachable: true }], "logged-in"), "logged-out");
-  assert.equal(matcher.deriveSessionStatus([{ unreachable: true }], "logged-in"), "unknown");
+  // Neutral-only evidence never changes the status.
+  assert.equal(matcher.deriveSessionStatus([{ unreachable: true }], "logged-in"), "logged-in");
+  assert.equal(matcher.deriveSessionStatus([{ unreachable: true }], "logged-out"), "logged-out");
+  assert.equal(matcher.deriveSessionStatus([{ managerPresent: false, minsLeftBefore: 30 }], "logged-in"), "logged-in");
   assert.equal(matcher.deriveSessionStatus([], "logged-in"), "logged-in");
   assert.equal(matcher.deriveSessionStatus([{ ...active, ignored: true }], "logged-out"), "logged-out");
   assert.equal(matcher.deriveSessionStatus([]), "unknown");
@@ -252,4 +261,82 @@ test("identifies pages excluded from status and page-load tracking", function ()
   assert.equal(matcher.isIgnoredEraUrl("https://www.era.nih.gov/news"), true);
   assert.equal(matcher.isIgnoredEraUrl("https://public.era.nih.gov/erahelp/commons/index.htm"), true);
   assert.equal(matcher.isIgnoredEraUrl("https://public.era.nih.gov/commonsplus/home.era"), false);
+});
+
+test("cookie change events: overwrite ignored, deletion and expiry end, a future value is live", function () {
+  var now = 1000000;
+  var cookie = { name: "ERA_SESSION_TIMEOUT_COOKIE", domain: ".era.nih.gov", value: String(now + 60000) };
+  assert.deepEqual(matcher.classifyCookieChange({ removed: true, cause: "overwrite", cookie: cookie }, now), { kind: "ignore" });
+  assert.equal(matcher.classifyCookieChange({ removed: true, cause: "explicit", cookie: cookie }, now).reason, "eRA timer cookie deleted");
+  assert.equal(matcher.classifyCookieChange({ removed: true, cause: "expired_overwrite", cookie: cookie }, now).kind, "ended");
+  assert.equal(matcher.classifyCookieChange({ removed: true, cause: "expired", cookie: cookie }, now).reason, "eRA timer cookie expired");
+  assert.equal(matcher.classifyCookieChange({ removed: true, cause: "evicted", cookie: cookie }, now).kind, "ignore");
+  assert.deepEqual(matcher.classifyCookieChange({ removed: false, cause: "explicit", cookie: cookie }, now), { kind: "live", logoutAt: now + 60000 });
+  assert.equal(matcher.classifyCookieChange({ removed: false, cookie: { ...cookie, value: String(now - 1) } }, now).kind, "ignore");
+  assert.equal(matcher.classifyCookieChange({ removed: false, cookie: { ...cookie, value: "" } }, now).kind, "ignore");
+  assert.equal(matcher.classifyCookieChange({ removed: true, cause: "explicit", cookie: { ...cookie, domain: ".example.com" } }, now).kind, "ignore");
+  assert.equal(matcher.classifyCookieChange({ removed: true, cause: "explicit", cookie: { ...cookie, name: "other" } }, now).kind, "ignore");
+  assert.equal(matcher.isEraTimeoutCookie({ ...cookie, domain: "public.era.nih.gov" }), true);
+  assert.equal(matcher.isEraTimeoutCookie({ ...cookie, domain: "era.nih.gov.evil.com" }), false);
+});
+
+test("summarizes the cookies Chrome holds: live, expired or missing", function () {
+  var now = 1000000;
+  function era(value) { return { name: "ERA_SESSION_TIMEOUT_COOKIE", domain: ".era.nih.gov", value: String(value) }; }
+  assert.deepEqual(matcher.summarizeEraCookies([], now), { state: "missing", logoutAt: null, minsLeft: null });
+  assert.equal(matcher.summarizeEraCookies([era("")], now).state, "missing");
+  assert.equal(matcher.summarizeEraCookies([era(now - 60000)], now).state, "expired");
+  var live = matcher.summarizeEraCookies([era(now - 60000), era(now + 120000)], now);
+  assert.equal(live.state, "live");
+  assert.equal(live.logoutAt, now + 120000);
+  assert.equal(live.minsLeft, 2);
+});
+
+test("decides the session from tabs and the cookie, preferring positive evidence", function () {
+  var active = { managerPresent: true, minsLeftBefore: 41, path: "/a" };
+  var login = { isLoginPage: true, path: "/login" };
+  var noCookieTab = { managerPresent: true, minsLeftBefore: null, path: "/b" };
+  var live = { state: "live" };
+  var missing = { state: "missing" };
+  assert.deepEqual(matcher.decideSession([active, login], "logged-in", missing), { status: "logged-in", reason: "live eRA timer", path: "/a" });
+  // A login page ends the session even while the cookie is still live.
+  assert.equal(matcher.decideSession([login], "logged-in", live).status, "logged-out");
+  // A tab that saw no cookie is overruled by a live cookie read from Chrome.
+  assert.equal(matcher.decideSession([noCookieTab], "logged-in", live).status, "logged-in");
+  assert.equal(matcher.decideSession([noCookieTab], "logged-in", null).reason, "cookie deleted");
+  assert.deepEqual(matcher.decideSession([{ unreachable: true }], "logged-in", missing),
+    { status: "logged-out", reason: "eRA timer cookie deleted", path: null });
+  assert.equal(matcher.decideSession([{ unreachable: true }], "logged-in", { state: "expired" }).reason, "eRA timer cookie expired");
+  assert.equal(matcher.decideSession([{ unreachable: true }], "logged-in", null).status, "logged-in");
+  assert.equal(matcher.decideSession([], "unknown", live).status, "logged-in");
+  // A cookie that is merely still there does not undo a logout.
+  assert.equal(matcher.decideSession([], "logged-out", live).status, "logged-out");
+  assert.equal(matcher.decideSession([], "unknown", missing).status, "unknown");
+});
+
+test("the popup's logout note names what ended the session", function () {
+  var stillLive = "eRA's own timer still had time left — something else ended the session (server or a hard limit).";
+  assert.equal(matcher.logoutNote({ reason: "login or logout page", minutesSinceLastNudge: 3, minutesLeftAtLastNudge: 45 }), stillLive);
+  assert.equal(matcher.logoutNote({ reason: "login or logout page", minutesSinceLastNudge: 50, minutesLeftAtLastNudge: 45 }), null);
+  assert.equal(matcher.logoutNote({ reason: "login or logout page", minutesSinceLastNudge: null, minutesLeftAtLastNudge: 45 }), null);
+  assert.match(matcher.logoutNote({ reason: "eRA timer cookie deleted", minutesSinceLastNudge: 3, minutesLeftAtLastNudge: 45 }),
+    /page timer or the Logout button/);
+  assert.match(matcher.logoutNote({ reason: "cookie deleted", minutesSinceLastNudge: 3, minutesLeftAtLastNudge: 45 }),
+    /page timer or the Logout button/);
+  assert.match(matcher.logoutNote({ reason: "eRA timer cookie expired" }), /timer ran out/);
+  assert.equal(matcher.logoutNote(null), null);
+});
+
+test("formats server timeouts, server warnings and the no-tabs cookie state", function () {
+  assert.equal(matcher.describeServer({ serverCalled: true, serverTimeout: true }), "server timeout");
+  assert.equal(
+    logAt({ type: "server-warning" }),
+    "10:04 server rejected keep-alive (redirect) /commonsplus/home.era; eRA timer still live, still nudging"
+  );
+  assert.equal(
+    logAt({ type: "no-tabs", from: "logged-in", to: "logged-in", cookie: "live", minsLeft: 30 }),
+    "10:04 no eRA tabs open, cookie 30.0 min; still logged in, nothing to nudge (4-minute timer stopped)"
+  );
+  assert.equal(logAt({ type: "no-tabs", from: "logged-in", to: "logged-out", cookie: "missing", minsLeft: null }), "10:04 no eRA tabs open, cookie deleted");
+  assert.equal(logAt({ type: "no-tabs", from: "logged-in", to: "logged-in", cookie: null }), "10:04 no eRA tabs open, cookie unreadable; still logged in, nothing to nudge (4-minute timer stopped)");
 });

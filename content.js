@@ -6,6 +6,7 @@
   var KNOWN_MODAL_IDS = ["sessionTimeoutModalDialog", "sessionTimeoutModalDialogNative"];
   var CLICK_COOLDOWN_MS = 30 * 1000;
   var OBSERVER_THROTTLE_MS = 500;
+  var PING_TIMEOUT_MS = 15 * 1000;
 
   function contextAlive() {
     try {
@@ -151,14 +152,28 @@
 
   function pingServer(url, result) {
     result.serverCalled = true;
+    var controller = typeof AbortController === "function" ? new AbortController() : null;
+    var timedOut = false;
+    var timer = null;
+    // A hung request must not hold up the background's whole tick. The race
+    // settles even if the aborted fetch never does.
+    var timeout = new Promise(function (resolve) {
+      timer = window.setTimeout(function () {
+        timedOut = true;
+        if (controller) controller.abort();
+        resolve();
+      }, PING_TIMEOUT_MS);
+    });
     // redirect: "manual" keeps a rejected session from following eRA into
     // its login page; the redirect itself is the answer we want.
-    return fetch(url, {
+    var request = fetch(url, {
       method: "GET",
       credentials: "include",
       cache: "no-store",
-      redirect: "manual"
+      redirect: "manual",
+      signal: controller ? controller.signal : undefined
     }).then(function (response) {
+      if (timedOut) return;
       if (response.body && typeof response.body.cancel === "function") {
         response.body.cancel().catch(function () {});
       }
@@ -169,8 +184,16 @@
         result.serverStatus = response.status;
       }
     }).catch(function () {
+      if (timedOut) return;
       result.serverError = true;
       result.serverStatus = null;
+    });
+    return Promise.race([request, timeout]).then(function () {
+      window.clearTimeout(timer);
+      if (timedOut) {
+        result.serverTimeout = true;
+        result.serverStatus = null;
+      }
     });
   }
 
@@ -187,7 +210,8 @@
       serverCalled: false,
       serverStatus: null,
       serverRejected: false,
-      serverError: false
+      serverError: false,
+      serverTimeout: false
     };
     if (!enabled || !state.managerPresent || state.logoutAt === null || state.logoutAt <= now) {
       sendResponse(result);
@@ -213,7 +237,9 @@
   function onMessage(message, sender, sendResponse) {
     if (stopped || !message) return false;
     if (message.type === "probe") {
-      sendResponse(pageState());
+      var state = pageState();
+      state.disabled = !enabled;
+      sendResponse(state);
       return false;
     }
     if (message.type === "nudge-activity") return nudge(message, sendResponse);

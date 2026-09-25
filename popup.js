@@ -8,6 +8,7 @@ var defaults = {
   lastNudgeAt: null,
   eraLogoutAt: null,
   lastAutoClick: null,
+  serverWarning: null,
   logoutRecords: [],
   diagnosticLog: []
 };
@@ -42,11 +43,11 @@ function renderLogoutRecords(records) {
       " after you last loaded a page; eRA timer at last nudge: " +
       minutesText(record.minutesLeftAtLastNudge, "unavailable") + "; " + server;
     container.appendChild(item);
-    if (typeof record.minutesLeftAtLastNudge === "number" && record.minutesLeftAtLastNudge >= 10) {
+    var note = matcher.logoutNote(record);
+    if (note) {
       var warning = document.createElement("li");
       warning.className = "logout-warning";
-      warning.textContent = "eRA's own timer still had " + minutesText(record.minutesLeftAtLastNudge) +
-        " left — the session was ended by something else (server or a hard limit).";
+      warning.textContent = note;
       container.appendChild(warning);
     }
   });
@@ -78,6 +79,11 @@ function render(state) {
   document.getElementById("last-nudge").textContent = matcher.formatTime(state.lastNudgeAt);
   document.getElementById("logout-at").textContent = matcher.formatTime(state.eraLogoutAt);
   document.getElementById("last-click").textContent = matcher.formatTime(state.lastAutoClick);
+  var serverWarning = document.getElementById("server-warning");
+  var showWarning = state.enabled && state.sessionStatus === "logged-in" && !!state.serverWarning;
+  serverWarning.hidden = !showWarning;
+  serverWarning.textContent = showWarning ? "eRA's server rejected the keep-alive (redirect) at " +
+    matcher.formatTime(state.serverWarning.at) + ", but eRA's timer is still live, so the extension keeps nudging." : "";
   renderLogoutRecords(state.logoutRecords || []);
   renderDiagnosticLog(state.diagnosticLog || []);
 }

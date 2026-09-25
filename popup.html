@@ -22,6 +22,7 @@
       #diagnostic-log { margin-top: 8px; max-height: 240px; overflow: auto; color: #4b5563; font: 11px/1.45 ui-monospace, monospace; }
       #diagnostic-log div { margin: 4px 0; }
       #copy-log { margin-top: 8px; padding: 5px 9px; }
+      #server-warning { margin: 12px 0 0; color: #92400e; }
       #version { margin-top: 16px; color: #6b7280; font-size: 11px; }
     </style>
   </head>
@@ -36,6 +37,7 @@
       <dt>eRA will log you out at</dt><dd id="logout-at">Never</dd>
       <dt>Last continued warning</dt><dd id="last-click">Never</dd>
     </dl>
+    <p id="server-warning" hidden></p>
     <h2>Recent logouts</h2>
     <ul id="logout-records"></ul>
     <details>
