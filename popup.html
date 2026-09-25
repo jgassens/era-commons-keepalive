@@ -5,59 +5,166 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Session Keeper for eRA Commons (unofficial)</title>
     <style>
-      /* A fixed width: left to itself Chrome shrinks the popup to its narrowest
-         fit, and long logout records then push the log far out of view. The
-         auto side margins do nothing inside the popup (its window is sized to
-         fit the body exactly) but center this same page when it is opened as
-         a full browser tab instead. */
-      html { background: #eef2f6; }
-      body { font: 14px/1.4 system-ui, sans-serif; margin: 16px auto; width: 360px; color: #1f2937; }
-      h1 { font-size: 16px; margin: 0 0 14px; }
-      #open-tab { display: block; text-align: right; font-size: 12px; margin: 0 0 10px; color: #2563eb; text-decoration: none; }
+      :root {
+        --bg: #ffffff;
+        --fg: #1f2937;
+        --muted: #6b7280;
+        --border: #e5e7eb;
+        --card-bg: #f9fafb;
+        --link: #2563eb;
+        --ok: #16a34a;
+        --ok-bg: #f0fdf4;
+        --bad: #dc2626;
+        --bad-bg: #fef2f2;
+        --neutral: #9ca3af;
+        --neutral-bg: #f3f4f6;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) {
+          --bg: #1f2328;
+          --fg: #e5e7eb;
+          --muted: #9ca3af;
+          --border: #3a3f47;
+          --card-bg: #262b33;
+          --link: #7ab0ff;
+          --ok: #4ade80;
+          --ok-bg: #10281a;
+          --bad: #f87171;
+          --bad-bg: #331414;
+          --neutral: #9ca3af;
+          --neutral-bg: #2b2f36;
+        }
+      }
+      :root[data-theme="dark"] {
+        --bg: #1f2328;
+        --fg: #e5e7eb;
+        --muted: #9ca3af;
+        --border: #3a3f47;
+        --card-bg: #262b33;
+        --link: #7ab0ff;
+        --ok: #4ade80;
+        --ok-bg: #10281a;
+        --bad: #f87171;
+        --bad-bg: #331414;
+        --neutral: #9ca3af;
+        --neutral-bg: #2b2f36;
+      }
+      html, body { margin: 0; }
+      body { background: var(--bg); }
+      main {
+        box-sizing: border-box;
+        width: 360px;
+        margin: 0 auto;
+        padding: 16px;
+        font: 13px/1.45 system-ui, sans-serif;
+        color: var(--fg);
+        background: var(--bg);
+      }
+      .titlebar { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+      h1 { font-size: 16px; font-weight: 600; margin: 0; }
+      .subtitle { margin: 2px 0 0; font-size: 11px; color: var(--muted); }
+      #open-tab { flex: 0 0 auto; font-size: 12px; color: var(--link); text-decoration: none; white-space: nowrap; }
       #open-tab:hover { text-decoration: underline; }
-      label { display: flex; align-items: center; gap: 8px; font-weight: 600; }
-      label + label { margin-top: 8px; font-weight: 400; }
-      input { width: 18px; height: 18px; }
-      dl { margin: 16px 0 0; }
-      dt { font-weight: 600; margin-top: 8px; }
-      dd { margin: 1px 0 0; color: #4b5563; }
-      h2 { font-size: 14px; margin: 20px 0 6px; }
-      #logout-records { margin: 0; padding-left: 20px; color: #4b5563; max-height: 190px; overflow: auto; }
-      #logout-records li { margin: 5px 0; }
-      #logout-records .logout-warning { color: #991b1b; }
-      details { margin-top: 16px; }
-      summary { cursor: pointer; font-weight: 600; }
-      #diagnostic-log { margin-top: 8px; max-height: 240px; overflow: auto; color: #4b5563; font: 11px/1.45 ui-monospace, monospace; }
-      #diagnostic-log div { margin: 4px 0; }
-      #copy-log { margin-top: 8px; padding: 5px 9px; }
-      #server-warning { margin: 12px 0 0; color: #92400e; }
-      #session-pattern { margin: 0 0 6px; color: #1f2937; font-weight: 600; }
-      #version { margin-top: 16px; color: #6b7280; font-size: 11px; }
+
+      .status-block {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        margin-top: 12px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        background: var(--neutral-bg);
+      }
+      .status-block.tone-ok { background: var(--ok-bg); }
+      .status-block.tone-bad { background: var(--bad-bg); }
+      .status-dot { flex: 0 0 auto; width: 9px; height: 9px; margin-top: 4px; border-radius: 50%; background: var(--neutral); }
+      .status-block.tone-ok .status-dot { background: var(--ok); }
+      .status-block.tone-bad .status-dot { background: var(--bad); }
+      .status-text { margin: 0; font-size: 13px; line-height: 1.4; }
+
+      h2 {
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--muted);
+        margin: 16px 0 8px;
+      }
+
+      dl.details { margin: 4px 0 0; display: grid; grid-template-columns: auto 1fr; column-gap: 12px; row-gap: 6px; }
+      dl.details dt { font-weight: 400; color: var(--muted); }
+      dl.details dd { margin: 0; text-align: right; }
+
+      .switches { margin-top: 4px; }
+      label { display: flex; align-items: center; gap: 8px; font-weight: 400; }
+      label + label { margin-top: 8px; }
+      input { width: 16px; height: 16px; }
+      .hint { margin: 6px 0 0; font-size: 11px; color: var(--muted); }
+
+      #session-pattern { font-size: 12px; color: var(--muted); margin: 12px 0 0; }
+
+      #logout-records { margin: 0; display: flex; flex-direction: column; gap: 8px; }
+      .logout-card { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--card-bg); }
+      .logout-headline { margin: 0; font-weight: 600; font-size: 12.5px; }
+      .logout-summary { margin: 3px 0 0; font-size: 11.5px; color: var(--muted); }
+      .logout-note { margin: 3px 0 0; font-size: 11.5px; color: var(--muted); }
+      .logout-more { margin-top: 4px; }
+      .logout-more summary { cursor: pointer; font-size: 11px; color: var(--link); }
+      .logout-facts { margin: 4px 0 0; font-size: 11px; color: var(--muted); }
+      .empty { margin: 0; color: var(--muted); font-size: 12px; }
+
+      details.log-details { margin-top: 16px; }
+      details.log-details summary { cursor: pointer; font-weight: 600; font-size: 12px; }
+      #diagnostic-log { margin-top: 8px; max-height: 200px; overflow: auto; color: var(--muted); font: 12px/1.5 ui-monospace, monospace; }
+      #diagnostic-log div { margin: 3px 0; }
+      #copy-log { margin-top: 8px; padding: 5px 9px; font-size: 12px; }
+
+      #version { margin-top: 16px; color: var(--muted); font-size: 11px; }
     </style>
   </head>
   <body>
-    <a id="open-tab" href="popup.html" target="_blank">Open in a tab ↗</a>
-    <h1>Session Keeper for eRA Commons <small>(unofficial, not affiliated with NIH/eRA)</small></h1>
-    <label><input id="enabled" type="checkbox"> Keep session active</label>
-    <label><input id="ping-server" type="checkbox"> Also ping eRA's server</label>
-    <dl>
-      <dt>Status</dt><dd id="status">Loading…</dd>
-      <dt>Signed in since</dt><dd id="signed-in">Not signed in</dd>
-      <dt>Last activity nudge</dt><dd id="last-nudge">Never</dd>
-      <dt>eRA will log you out at</dt><dd id="logout-at">Never</dd>
-      <dt>Last continued warning</dt><dd id="last-click">Never</dd>
-    </dl>
-    <p id="server-warning" hidden></p>
-    <details>
-      <summary>Diagnostic log</summary>
-      <div id="diagnostic-log"></div>
-      <button id="copy-log" type="button">Copy log</button>
-    </details>
-    <h2>Recent logouts</h2>
-    <p id="session-pattern" hidden></p>
-    <ul id="logout-records"></ul>
-    <div id="version"></div>
-    <script src="src/matcher.js"></script>
-    <script src="popup.js"></script>
+    <main>
+      <div class="titlebar">
+        <div>
+          <h1>Session Keeper for eRA Commons</h1>
+          <p class="subtitle">Unofficial · not affiliated with NIH or eRA</p>
+        </div>
+        <a id="open-tab" href="popup.html" target="_blank">Open in a tab ↗</a>
+      </div>
+
+      <div id="status-block" class="status-block">
+        <span id="status-dot" class="status-dot"></span>
+        <p id="status" class="status-text">Loading…</p>
+      </div>
+
+      <dl id="details" class="details">
+        <dt id="dt-signed-in">Signed in since</dt><dd id="signed-in"></dd>
+        <dt id="dt-last-nudge">Last activity nudge</dt><dd id="last-nudge"></dd>
+        <dt id="dt-server-checkin">Last server check-in</dt><dd id="server-checkin"></dd>
+        <dt id="dt-last-click">Last "Continue" click</dt><dd id="last-click"></dd>
+      </dl>
+
+      <h2>Controls</h2>
+      <div class="switches">
+        <label><input id="enabled" type="checkbox"> Keep session active</label>
+        <label><input id="ping-server" type="checkbox"> Also ping eRA's server</label>
+        <p class="hint">Needed: eRA's server ends sessions it hasn't heard from.</p>
+      </div>
+
+      <p id="session-pattern" hidden></p>
+
+      <h2>Recent logouts</h2>
+      <div id="logout-records"></div>
+
+      <details id="log-details" class="log-details">
+        <summary>Diagnostic log</summary>
+        <div id="diagnostic-log"></div>
+        <button id="copy-log" type="button">Copy log</button>
+      </details>
+
+      <div id="version"></div>
+      <script src="src/matcher.js"></script>
+      <script src="popup.js"></script>
+    </main>
   </body>
 </html>

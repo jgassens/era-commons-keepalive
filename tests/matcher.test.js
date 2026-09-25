@@ -350,6 +350,87 @@ test("the popup's logout note names what ended the session", function () {
   }), "eRA's server ended this session even though its page timer was still running. Keep \"Also ping eRA's server\" on.");
 });
 
+test("causeLabel maps each kind of logout reason to one short phrase", function () {
+  assert.equal(matcher.causeLabel({ reason: matcher.SERVER_END_REASON, serverEnded: true }), "eRA's server ended it");
+  assert.equal(matcher.causeLabel({
+    reason: "eRA sent you to its login page while its page timer still had 45 min left — eRA's server ended the session"
+  }), "eRA's server ended it");
+  assert.equal(matcher.causeLabel({ reason: "ended while no eRA tab was open" }), "Ended while no eRA tab was open");
+  assert.equal(matcher.causeLabel({ reason: "login or logout page (eRA timer cookie deleted)" }),
+    "eRA sent you to its login page");
+  assert.equal(matcher.causeLabel({ reason: "login or logout page" }), "eRA sent you to its login page");
+  assert.equal(matcher.causeLabel({ reason: "eRA timer cookie expired" }), "eRA's page timer ran out");
+  assert.equal(matcher.causeLabel({ reason: "eRA timer cookie deleted" }), "You logged out");
+  // No reason at all: the fields old (v1.2.0) records actually kept.
+  assert.equal(matcher.causeLabel({ minutesSinceLastPageLoad: 32 }), null);
+  assert.equal(matcher.causeLabel({ estimatedEndAt: 1700000000000 }), "Ended while no eRA tab was open");
+  assert.equal(matcher.causeLabel(null), null);
+  assert.equal(matcher.causeLabel({}), null);
+});
+
+test("logoutHeadline says 'Ended around' only for an estimated end, and names the cause", function () {
+  var at = Date.UTC(2026, 8, 25, 20, 1);
+  assert.equal(
+    matcher.logoutHeadline({ loggedOutDetectedAt: at, reason: "eRA timer cookie deleted" }),
+    "Ended " + matcher.clockTime(at) + " — You logged out"
+  );
+  assert.equal(
+    matcher.logoutHeadline({ loggedOutDetectedAt: at + 60000, estimatedEndAt: at, reason: "ended while no eRA tab was open" }),
+    "Ended around " + matcher.clockTime(at) + " — Ended while no eRA tab was open"
+  );
+  // No reason at all: still a headline, just without a cause.
+  assert.equal(matcher.logoutHeadline({ loggedOutDetectedAt: at }), "Ended " + matcher.clockTime(at));
+  assert.equal(matcher.logoutHeadline({}), "Ended at an unknown time");
+  assert.equal(matcher.logoutHeadline(null), "Ended at an unknown time");
+});
+
+test("logoutSummaryLine shows only the facts a record actually holds", function () {
+  var start = Date.UTC(2026, 8, 25, 17, 50);
+  assert.equal(matcher.logoutSummaryLine({ sessionStartedAt: start, estimatedEndAt: start + 130 * 60000 }),
+    "Session length 2 h 10 min");
+  assert.equal(matcher.logoutSummaryLine({ lastServerAcceptedAt: start }),
+    "last check-in " + matcher.clockTime(start));
+  // Pre-1.3 records used lastSuccessfulPingAt for the same fact.
+  assert.equal(matcher.logoutSummaryLine({ lastSuccessfulPingAt: start }),
+    "last check-in " + matcher.clockTime(start));
+  assert.equal(matcher.logoutSummaryLine({ sessionStartedAt: start, estimatedEndAt: start + 130 * 60000, lastServerAcceptedAt: start }),
+    "Session length 2 h 10 min · last check-in " + matcher.clockTime(start));
+  assert.equal(matcher.logoutSummaryLine({ minutesSinceLastPageLoad: 32 }), null);
+  assert.equal(matcher.logoutSummaryLine(null), null);
+});
+
+test("serverCheckInStatus reports off, accepted or refused", function () {
+  assert.equal(matcher.serverCheckInStatus({ pingServer: false, lastServerAcceptedAt: 1 }), "Off");
+  assert.equal(matcher.serverCheckInStatus({ pingServer: true }), null);
+  var t1 = Date.UTC(2026, 8, 25, 15, 57);
+  var t2 = Date.UTC(2026, 8, 25, 15, 59);
+  assert.equal(matcher.serverCheckInStatus({ pingServer: true, lastServerAcceptedAt: t1 }),
+    "Accepted at " + matcher.clockTime(t1));
+  assert.equal(matcher.serverCheckInStatus({ pingServer: true, firstRefusalAt: t2 }),
+    "Refused at " + matcher.clockTime(t2));
+  // The most recent of the two wins.
+  assert.equal(matcher.serverCheckInStatus({ pingServer: true, lastServerAcceptedAt: t1, firstRefusalAt: t2 }),
+    "Refused at " + matcher.clockTime(t2));
+  assert.equal(matcher.serverCheckInStatus({ pingServer: true, lastServerAcceptedAt: t2, firstRefusalAt: t1 }),
+    "Accepted at " + matcher.clockTime(t2));
+});
+
+test("popupStatus gives the pill's tone and sentence for each state", function () {
+  assert.deepEqual(matcher.popupStatus({ enabled: false, sessionStatus: "logged-in" }, null),
+    { tone: "neutral", text: "Turned off" });
+  assert.deepEqual(matcher.popupStatus({ enabled: true, sessionStatus: "idle" }, null),
+    { tone: "neutral", text: "No eRA tab open — not keeping the session alive" });
+  assert.deepEqual(matcher.popupStatus({ enabled: true, sessionStatus: "logged-in" }, null),
+    { tone: "ok", text: "Keeping you signed in" });
+  var logoutAt = Date.UTC(2026, 8, 25, 16, 45);
+  assert.deepEqual(matcher.popupStatus({ enabled: true, sessionStatus: "logged-in", eraLogoutAt: logoutAt }, null),
+    { tone: "ok", text: "Keeping you signed in — eRA will log you out at " + matcher.clockTime(logoutAt) + " unless you stay active" });
+  assert.deepEqual(matcher.popupStatus({ enabled: true, sessionStatus: "logged-out" }, null),
+    { tone: "bad", text: "Signed out — log in to eRA again." });
+  assert.deepEqual(matcher.popupStatus({ enabled: true, sessionStatus: "unknown" }, null),
+    { tone: "neutral", text: "Status unknown" });
+});
+
 test("compares extension versions", function () {
   assert.equal(matcher.isVersionBefore("1.4.2", "1.4.3"), true);
   assert.equal(matcher.isVersionBefore("1.2.0", "1.4.3"), true);
@@ -424,7 +505,7 @@ test("formats session lengths and names eRA's apparent session limit", function 
 
   var record = server(130);
   assert.equal(matcher.serverEndStatus(record), "eRA's server ended your session at " +
-    matcher.clockTime(record.estimatedEndAt) + " — 2 h 10 min after sign-in. Log in again.");
+    matcher.clockTime(record.estimatedEndAt) + ", 2 h 10 min after sign-in.");
   assert.match(matcher.logoutNote(record), /fixed session limit/);
   assert.equal(matcher.serverEndNotification(record.estimatedEndAt, null).message,
     "eRA's server stopped accepting your session around " + matcher.clockTime(record.estimatedEndAt) + ".");

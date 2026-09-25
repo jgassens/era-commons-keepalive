@@ -40,7 +40,7 @@ eRA's own page calls a check-in address (`keepSessionAlive.jsp`) on eRA's server
 
 So since version 1.4.3 the switch is **on by default**. Updating from an older version turns it on once; if you then switch it off, it stays off. With the switch on, every 4 minutes the extension calls that check-in address once per eRA application (not once per tab) and records the answer. The call goes only to eRA's own keep-alive address on eRA's own site. It gives up on a call after 15 seconds and logs **server timeout**. With the switch off, the extension still nudges eRA's page but does not call the server.
 
-If the server answers with a redirect instead, the extension does not follow it to the login page. A redirect means the server refused the check-in. One refusal could be a blip, so the extension logs **server refused keep-alive — rechecking in 30 s**, turns the badge orange, shows a warning line in the popup, and asks the server once more 30 seconds later. If the server accepts, everything goes back to normal. If it refuses a second time in a row, or an eRA tab lands on eRA's login page while the recheck is pending, the session has ended — see the next section. If no eRA tab can be pinged when the recheck is due, it tries again every 30 seconds, up to three times, and then leaves the question to the next 4-minute check.
+If the server answers with a redirect instead, the extension does not follow it to the login page. A redirect means the server refused the check-in. One refusal could be a blip, so the extension logs **server refused keep-alive — rechecking in 30 s**, turns the badge orange, shows *Refused at …* in the popup's **Last server check-in** line, and asks the server once more 30 seconds later. If the server accepts, everything goes back to normal. If it refuses a second time in a row, or an eRA tab lands on eRA's login page while the recheck is pending, the session has ended — see the next section. If no eRA tab can be pinged when the recheck is due, it tries again every 30 seconds, up to three times, and then leaves the question to the next 4-minute check.
 
 ### "eRA ended your session — log in again"
 
@@ -54,7 +54,7 @@ In one real log, eRA accepted every check-in for about two hours and then refuse
 
 Each entry shows when the logout was noticed and why (for a session that ended while no eRA tab was open, or that eRA's server ended, also when it probably ended), the **session length** (sign-in to the end), how long since the last activity nudge, how long since you last loaded an eRA page, how many minutes eRA's own timer had left at the last nudge, and the last server answer (or that the server was not called). Logouts recorded by older versions show only the facts those versions kept. If one stored entry cannot be read, only that line says so; the rest of the popup still shows.
 
-When the most recent logout was eRA's server ending the session, the status line says so, for example *eRA's server ended your session at 3:01 PM — 2 h 10 min after sign-in. Log in again.*
+When the most recent logout was eRA's server ending the session, the status line says so, for example *Signed out — log in to eRA again. eRA's server ended your session at 3:01 PM, 2 h 10 min after sign-in.*
 
 Under some entries the popup adds one line saying what ended the session:
 

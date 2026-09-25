@@ -10,6 +10,8 @@ var defaults = {
   lastAutoClick: null,
   serverWarning: null,
   serverEndedAt: null,
+  lastServerAcceptedAt: null,
+  firstRefusalAt: null,
   logoutRecords: [],
   diagnosticLog: []
 };
@@ -38,60 +40,15 @@ function isNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-// One line per logout. Records from older versions lack some fields; only
-// the facts a record actually holds are shown.
-function describeLogoutRecord(record) {
-  record = record && typeof record === "object" ? record : {};
-  var when = isNumber(record.loggedOutDetectedAt) ? matcher.formatTime(record.loggedOutDetectedAt) : "at an unknown time";
-  if (isNumber(record.estimatedEndAt)) {
-    when = "probably ended around " + matcher.formatTime(record.estimatedEndAt) + ", noticed " + when;
-  }
-  var facts = [];
-  var length = matcher.sessionLengthMinutes(record);
-  if (isNumber(length)) facts.push("session length " + matcher.formatDuration(length));
-  if (isNumber(record.minutesSinceLastNudge)) {
-    facts.push(matcher.formatMinutes(record.minutesSinceLastNudge) + " after last activity nudge");
-  }
-  if (isNumber(record.minutesSinceLastPageLoad)) {
-    facts.push(matcher.formatMinutes(record.minutesSinceLastPageLoad) + " after you last loaded a page");
-  }
-  if (isNumber(record.minutesLeftAtLastNudge)) {
-    facts.push("eRA timer at last nudge: " + matcher.formatMinutes(record.minutesLeftAtLastNudge));
-  }
-  var server = typeof record.lastServerPing === "string" && record.lastServerPing ? record.lastServerPing :
-    isNumber(record.lastServerPingStatus) ? "server " + record.lastServerPingStatus :
-    typeof record.pingServer === "boolean" ? (record.pingServer ? "no server ping recorded" : "server not called (ping off)") :
-    // Versions before 1.3 pinged on every check and kept only its timing.
-    isNumber(record.minutesSinceLastPing) ? "last server ping " + matcher.formatMinutes(record.minutesSinceLastPing) + " earlier" : null;
-  if (server) facts.push(server);
-  return "Logged out " + when + (record.reason ? " (" + String(record.reason) + ")" : "") +
-    (facts.length ? " — " + facts.join("; ") : "");
-}
-
-function renderLogoutRecords(records) {
-  var container = document.getElementById("logout-records");
-  container.textContent = "";
-  if (!records.length) {
-    container.textContent = "No logged-out sessions detected yet.";
-    return;
-  }
-  records.forEach(function (record) {
-    var item = document.createElement("li");
-    var note = null;
-    try {
-      item.textContent = describeLogoutRecord(record);
-      note = matcher.logoutNote(record);
-    } catch (error) {
-      item.textContent = "Logged out (this record could not be read)";
-    }
-    container.appendChild(item);
-    if (note) {
-      var warning = document.createElement("li");
-      warning.className = "logout-warning";
-      warning.textContent = note;
-      container.appendChild(warning);
-    }
-  });
+// Shows a dl row only when there is a value to show; otherwise hides both
+// its dt and dd, so no row ever prints "Never" or "Not signed in".
+function detailRow(dtId, ddId, value) {
+  var dt = document.getElementById(dtId);
+  var dd = document.getElementById(ddId);
+  var show = value !== null && typeof value !== "undefined" && value !== "";
+  if (dt) dt.hidden = !show;
+  if (dd) dd.hidden = !show;
+  if (dd && show) dd.textContent = value;
 }
 
 function logLine(entry) {
@@ -117,6 +74,70 @@ function renderDiagnosticLog(entries) {
   });
 }
 
+function renderLogoutCard(record) {
+  var card = document.createElement("div");
+  card.className = "logout-card";
+
+  var headline = document.createElement("p");
+  headline.className = "logout-headline";
+  try {
+    headline.textContent = matcher.logoutHeadline(record);
+  } catch (error) {
+    headline.textContent = "Logged out (this record could not be read)";
+    card.appendChild(headline);
+    return card;
+  }
+  card.appendChild(headline);
+
+  var summaryLine = null;
+  var note = null;
+  var facts = [];
+  try { summaryLine = matcher.logoutSummaryLine(record); } catch (error) { summaryLine = null; }
+  try { note = matcher.logoutNote(record); } catch (error) { note = null; }
+  try { facts = matcher.logoutDetailFacts(record); } catch (error) { facts = []; }
+
+  if (summaryLine) {
+    var summaryEl = document.createElement("p");
+    summaryEl.className = "logout-summary";
+    summaryEl.textContent = summaryLine;
+    card.appendChild(summaryEl);
+  }
+  if (note) {
+    var noteEl = document.createElement("p");
+    noteEl.className = "logout-note";
+    noteEl.textContent = note;
+    card.appendChild(noteEl);
+  }
+  if (facts.length) {
+    var moreDetails = document.createElement("details");
+    moreDetails.className = "logout-more";
+    var summaryTag = document.createElement("summary");
+    summaryTag.textContent = "More";
+    moreDetails.appendChild(summaryTag);
+    var factsEl = document.createElement("p");
+    factsEl.className = "logout-facts";
+    factsEl.textContent = facts.join(" · ");
+    moreDetails.appendChild(factsEl);
+    card.appendChild(moreDetails);
+  }
+  return card;
+}
+
+function renderLogoutRecords(records) {
+  var container = document.getElementById("logout-records");
+  container.textContent = "";
+  if (!records.length) {
+    var empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = "No logged-out sessions detected yet.";
+    container.appendChild(empty);
+    return;
+  }
+  records.forEach(function (record) {
+    container.appendChild(renderLogoutCard(record));
+  });
+}
+
 // The server-end sentence belongs only to the end serverEndedAt marks: the
 // latest record must be that end, noticed at that same moment.
 function currentServerEnd(state) {
@@ -127,29 +148,20 @@ function currentServerEnd(state) {
 
 function renderStatus(state) {
   var serverEnd = currentServerEnd(state);
-  document.getElementById("status").textContent = !state.enabled ? "Disabled" :
-    state.sessionStatus === "logged-in" ? "Enabled — logged in" :
-    state.sessionStatus === "logged-out" && serverEnd ? matcher.serverEndStatus(serverEnd) :
-    state.sessionStatus === "logged-out" ? "Enabled — logged out" :
-    state.sessionStatus === "idle" ? "No eRA tab open — not keeping the session alive" : "Enabled — status unknown";
-  document.getElementById("signed-in").textContent =
-    state.sessionStatus === "logged-in" || state.sessionStatus === "idle" ?
-      matcher.formatTime(state.sessionStartedAt) : "Not signed in";
-  document.getElementById("last-nudge").textContent = matcher.formatTime(state.lastNudgeAt);
-  document.getElementById("logout-at").textContent = matcher.formatTime(state.eraLogoutAt);
-  document.getElementById("last-click").textContent = matcher.formatTime(state.lastAutoClick);
+  var status = matcher.popupStatus(state, serverEnd);
+  var block = document.getElementById("status-block");
+  block.classList.remove("tone-ok", "tone-bad", "tone-neutral");
+  block.classList.add("tone-" + status.tone);
+  document.getElementById("status").textContent = status.text;
 }
 
-function renderServerWarning(state) {
-  var serverWarning = document.getElementById("server-warning");
-  var warning = state.serverWarning && typeof state.serverWarning === "object" ? state.serverWarning : null;
-  var showWarning = !!state.enabled && state.sessionStatus === "logged-in" && !!warning;
-  serverWarning.hidden = !showWarning;
-  serverWarning.textContent = !showWarning ? "" : warning.recheck ?
-    "eRA's server refused the keep-alive at " + matcher.formatTime(warning.at) +
-      ". Checking again in 30 seconds; if it refuses again, the session has ended." :
-    "eRA's server rejected the keep-alive (redirect) at " + matcher.formatTime(warning.at) +
-      ", but eRA's timer is still live, so the extension keeps nudging.";
+function renderDetails(state) {
+  detailRow("dt-signed-in", "signed-in",
+    (state.sessionStatus === "logged-in" || state.sessionStatus === "idle") && isNumber(state.sessionStartedAt) ?
+      matcher.formatTime(state.sessionStartedAt) : null);
+  detailRow("dt-last-nudge", "last-nudge", isNumber(state.lastNudgeAt) ? matcher.formatTime(state.lastNudgeAt) : null);
+  detailRow("dt-server-checkin", "server-checkin", matcher.serverCheckInStatus(state));
+  detailRow("dt-last-click", "last-click", isNumber(state.lastAutoClick) ? matcher.formatTime(state.lastAutoClick) : null);
 }
 
 // Shown once two server-ended sessions lasted about as long as each other.
@@ -170,7 +182,7 @@ function render(state) {
     pingServer.checked = state.pingServer !== false;
   });
   section("status", function () { renderStatus(state); });
-  section("server-warning", function () { renderServerWarning(state); });
+  section("details", function () { renderDetails(state); });
   section("session-pattern", function () { renderSessionPattern(listFrom(state.logoutRecords)); });
   section("logout-records", function () { renderLogoutRecords(listFrom(state.logoutRecords)); });
   section("diagnostic-log", function () { renderDiagnosticLog(listFrom(state.diagnosticLog)); });

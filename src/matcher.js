@@ -370,13 +370,41 @@
     };
   }
 
-  // The popup's status line for a server-ended session.
+  // The sentence appended to the popup's status line for a server-ended session.
   function serverEndStatus(record) {
     var when = clockTime(isServerEndRecord(record) &&
       typeof record.estimatedEndAt === "number" ? record.estimatedEndAt : record && record.loggedOutDetectedAt);
     var length = formatDuration(sessionLengthMinutes(record));
     return "eRA's server ended your session" + (when ? " at " + when : "") +
-      (length ? " — " + length + " after sign-in" : "") + ". Log in again.";
+      (length ? ", " + length + " after sign-in" : "") + ".";
+  }
+
+  function isFiniteNumber(value) {
+    return typeof value === "number" && Number.isFinite(value);
+  }
+
+  // The status pill's tone and sentence. serverEndRecord is the current
+  // server-ended record (see the popup's own currentServerEnd), or null.
+  function popupStatus(state, serverEndRecord) {
+    state = state && typeof state === "object" ? state : {};
+    if (state.enabled === false) return { tone: "neutral", text: "Turned off" };
+    if (state.sessionStatus === "idle") {
+      return { tone: "neutral", text: "No eRA tab open — not keeping the session alive" };
+    }
+    if (state.sessionStatus === "logged-in") {
+      var logoutAt = isFiniteNumber(state.eraLogoutAt) ? clockTime(state.eraLogoutAt) : null;
+      return {
+        tone: "ok",
+        text: "Keeping you signed in" +
+          (logoutAt ? " — eRA will log you out at " + logoutAt + " unless you stay active" : "")
+      };
+    }
+    if (state.sessionStatus === "logged-out") {
+      var text = "Signed out — log in to eRA again.";
+      if (serverEndRecord) text += " " + serverEndStatus(serverEndRecord);
+      return { tone: "bad", text: text };
+    }
+    return { tone: "neutral", text: "Status unknown" };
   }
 
   // When at least two server-ended sessions lasted within 15 minutes of each
@@ -426,6 +454,86 @@
       return "eRA's own timer still had time left — something else ended the session (server or a hard limit).";
     }
     return null;
+  }
+
+  // A short label naming what a logout record's reason points to. One of a
+  // fixed handful of phrases; null when the reason is unknown (older records
+  // carry no reason at all).
+  function causeLabel(record) {
+    record = record && typeof record === "object" ? record : {};
+    var reason = String(record.reason || "");
+    if (isServerEndRecord(record) || /server ended the session/i.test(reason)) return "eRA's server ended it";
+    if (/no eRA tab/i.test(reason)) return "Ended while no eRA tab was open";
+    if (/login or logout page/i.test(reason)) return "eRA sent you to its login page";
+    if (/cookie expired/i.test(reason)) return "eRA's page timer ran out";
+    if (/cookie deleted/i.test(reason)) return "You logged out";
+    if (!reason && isFiniteNumber(record.estimatedEndAt)) return "Ended while no eRA tab was open";
+    return null;
+  }
+
+  // The logout card's bold first line: when it ended, and why.
+  function logoutHeadline(record) {
+    record = record && typeof record === "object" ? record : {};
+    var estimated = isFiniteNumber(record.estimatedEndAt);
+    var time = estimated ? clockTime(record.estimatedEndAt) :
+      isFiniteNumber(record.loggedOutDetectedAt) ? clockTime(record.loggedOutDetectedAt) : null;
+    var headline = time ? (estimated ? "Ended around " + time : "Ended " + time) : "Ended at an unknown time";
+    var cause = causeLabel(record);
+    return cause ? headline + " — " + cause : headline;
+  }
+
+  // The card's muted second line: session length and/or the last time eRA's
+  // server accepted a check-in. Only the facts the record actually holds;
+  // null when it holds neither.
+  function logoutSummaryLine(record) {
+    record = record && typeof record === "object" ? record : {};
+    var parts = [];
+    var length = formatDuration(sessionLengthMinutes(record));
+    if (length) parts.push("Session length " + length);
+    // lastSuccessfulPingAt is the pre-1.3 name for the same fact.
+    var checkIn = isFiniteNumber(record.lastServerAcceptedAt) ? record.lastServerAcceptedAt :
+      isFiniteNumber(record.lastSuccessfulPingAt) ? record.lastSuccessfulPingAt : null;
+    if (checkIn !== null) parts.push("last check-in " + clockTime(checkIn));
+    return parts.length ? parts.join(" · ") : null;
+  }
+
+  // "Off", "Accepted at 3:57 PM", "Refused at 3:59 PM", or null when the
+  // switch is on but no check-in has happened yet.
+  function serverCheckInStatus(state) {
+    state = state && typeof state === "object" ? state : {};
+    if (state.pingServer === false) return "Off";
+    var acceptedAt = isFiniteNumber(state.lastServerAcceptedAt) ? state.lastServerAcceptedAt : null;
+    var refusedAt = isFiniteNumber(state.firstRefusalAt) ? state.firstRefusalAt : null;
+    if (refusedAt !== null && (acceptedAt === null || refusedAt >= acceptedAt)) {
+      return "Refused at " + clockTime(refusedAt);
+    }
+    return acceptedAt !== null ? "Accepted at " + clockTime(acceptedAt) : null;
+  }
+
+  // The technical facts behind a logout card's "More" details: only the
+  // facts the record actually holds.
+  function logoutDetailFacts(record) {
+    record = record && typeof record === "object" ? record : {};
+    var facts = [];
+    if (isFiniteNumber(record.estimatedEndAt) && isFiniteNumber(record.loggedOutDetectedAt)) {
+      facts.push("noticed " + clockTime(record.loggedOutDetectedAt));
+    }
+    if (isFiniteNumber(record.minutesSinceLastNudge)) {
+      facts.push(formatMinutes(record.minutesSinceLastNudge) + " after last activity nudge");
+    }
+    if (isFiniteNumber(record.minutesSinceLastPageLoad)) {
+      facts.push(formatMinutes(record.minutesSinceLastPageLoad) + " after you last loaded a page");
+    }
+    if (isFiniteNumber(record.minutesLeftAtLastNudge)) {
+      facts.push("eRA timer at last nudge: " + formatMinutes(record.minutesLeftAtLastNudge));
+    }
+    var server = typeof record.lastServerPing === "string" && record.lastServerPing ? record.lastServerPing :
+      isFiniteNumber(record.lastServerPingStatus) ? "server " + record.lastServerPingStatus :
+      typeof record.pingServer === "boolean" ? (record.pingServer ? "no server ping recorded" : "server not called (ping off)") :
+      // Versions before 1.3 pinged on every check and kept only its timing.
+      isFiniteNumber(record.minutesSinceLastPing) ? "last server ping " + formatMinutes(record.minutesSinceLastPing) + " earlier" : null;
+    if (server) facts.push(server);
+    return facts;
   }
 
   function roundMinutes(value) {
@@ -572,6 +680,12 @@
     clockTime: clockTime,
     serverEndNotification: serverEndNotification,
     serverEndStatus: serverEndStatus,
+    popupStatus: popupStatus,
+    serverCheckInStatus: serverCheckInStatus,
+    causeLabel: causeLabel,
+    logoutHeadline: logoutHeadline,
+    logoutSummaryLine: logoutSummaryLine,
+    logoutDetailFacts: logoutDetailFacts,
     sessionEndPattern: sessionEndPattern,
     roundMinutes: roundMinutes,
     formatMinutes: formatMinutes,

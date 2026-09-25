@@ -13,20 +13,30 @@ var ROOT = path.join(__dirname, "..");
 // starting with ":").
 var REAL_STATE = JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures", "sample-state.json"), "utf8"));
 
-// Just enough DOM for popup.js: elements by id, created elements, text and
-// children. Setting textContent replaces the children, as in a browser.
+// Just enough DOM for popup.js: elements by id, created elements, text,
+// children and classList. Setting textContent replaces the children, as in
+// a browser.
 function fakeElement(tag) {
+  var classes = [];
   var element = {
     tagName: tag,
     children: [],
-    className: "",
     hidden: false,
     checked: false,
     listeners: {},
     _text: "",
     appendChild: function (child) { element.children.push(child); return child; },
-    addEventListener: function (type, fn) { element.listeners[type] = fn; }
+    addEventListener: function (type, fn) { element.listeners[type] = fn; },
+    classList: {
+      add: function () { Array.prototype.slice.call(arguments).forEach(function (c) { if (classes.indexOf(c) === -1) classes.push(c); }); },
+      remove: function () { Array.prototype.slice.call(arguments).forEach(function (c) { var i = classes.indexOf(c); if (i !== -1) classes.splice(i, 1); }); },
+      contains: function (c) { return classes.indexOf(c) !== -1; }
+    }
   };
+  Object.defineProperty(element, "className", {
+    get: function () { return classes.join(" "); },
+    set: function (value) { classes.length = 0; String(value).split(/\s+/).filter(Boolean).forEach(function (c) { classes.push(c); }); }
+  });
   Object.defineProperty(element, "textContent", {
     get: function () { return element._text + element.children.map(function (child) { return child.textContent; }).join(""); },
     set: function (value) { element._text = String(value); element.children = []; }
@@ -36,10 +46,12 @@ function fakeElement(tag) {
 
 function renderPopup(state, options) {
   options = options || {};
-  var ids = ["enabled", "ping-server", "status", "signed-in", "last-nudge", "logout-at", "last-click",
-    "server-warning", "session-pattern", "logout-records", "diagnostic-log", "copy-log", "version", "open-tab"];
+  var ids = ["enabled", "ping-server", "status", "status-block", "details",
+    "dt-signed-in", "signed-in", "dt-last-nudge", "last-nudge",
+    "dt-server-checkin", "server-checkin", "dt-last-click", "last-click",
+    "session-pattern", "logout-records", "diagnostic-log", "copy-log", "version", "open-tab"];
   var elements = {};
-  ids.forEach(function (id) { elements[id] = fakeElement(id === "logout-records" ? "ul" : "div"); });
+  ids.forEach(function (id) { elements[id] = fakeElement(id === "logout-records" ? "div" : "div"); });
   var warnings = [];
   var tabsCreated = [];
   var context = {
@@ -110,9 +122,18 @@ test("the popup renders the real stored state, with every section and the log li
   await settle();
   var e = popup.elements;
   assert.deepEqual(popup.warnings, []);
-  assert.equal(e.status.textContent, "Enabled — logged out");
+  assert.equal(e.status.textContent, "Signed out — log in to eRA again.");
+  assert.equal(e["status-block"].classList.contains("tone-bad"), true);
   assert.equal(e["ping-server"].checked, false);
   assert.equal(e.version.textContent, "Version 1.4.3");
+
+  // "Signed in since" has no value while logged out; "Last server check-in"
+  // is "Off" because the ping switch is off. Neither ever reads "Never".
+  assert.equal(e["dt-signed-in"].hidden, true);
+  assert.equal(e["signed-in"].hidden, true);
+  assert.equal(e["dt-last-nudge"].hidden, false);
+  assert.equal(e["server-checkin"].textContent, "Off");
+  assert.equal(e["dt-last-click"].hidden, false);
 
   var log = texts(e["diagnostic-log"]);
   assert.equal(log.length, 30);
@@ -122,13 +143,20 @@ test("the popup renders the real stored state, with every section and the log li
   // Old v1.2.0 nudges carry serverStatus and no pingServer.
   assert.ok(log.some(function (line) { return /nudge \/commonsplus\/home\.era: cookie 41\.0 -> 45\.0 min, server 204$/.test(line); }), log.join("\n"));
 
-  var records = texts(e["logout-records"]);
-  assert.match(records[0], /^Logged out .* \(login or logout page \(eRA timer cookie deleted\)\) — 1\.9 min after last activity nudge; 77\.6 min after you last loaded a page; eRA timer at last nudge: 45\.0 min; server not called \(ping off\)$/);
-  assert.match(records[1], /eRA deleted its own timeout cookie/);
-  // The v1.2.0 records have no reason, sign-in or ping switch: only what they hold.
-  assert.match(records[2], /^Logged out [^(]+ — 2\.0 min after last activity nudge; 50\.0 min after you last loaded a page$/);
-  assert.match(records[3], /^Logged out [^(]+ — 32\.0 min after you last loaded a page; last server ping 4\.0 min earlier$/);
-  records.forEach(function (line) { assert.doesNotMatch(line, /undefined|NaN|null|Never/); });
+  var cards = e["logout-records"].children;
+  assert.equal(cards.length, 3);
+  assert.match(cards[0].textContent, /^Ended .* — eRA sent you to its login page/);
+  assert.match(cards[0].textContent, /1\.9 min after last activity nudge/);
+  assert.match(cards[0].textContent, /77\.6 min after you last loaded a page/);
+  assert.match(cards[0].textContent, /eRA timer at last nudge: 45\.0 min/);
+  assert.match(cards[0].textContent, /server not called \(ping off\)/);
+  assert.match(cards[0].textContent, /eRA deleted its own timeout cookie/);
+  assert.match(cards[1].textContent, /^Ended [^—]+$/);
+  assert.match(cards[1].textContent, /2\.0 min after last activity nudge/);
+  assert.match(cards[1].textContent, /50\.0 min after you last loaded a page/);
+  assert.match(cards[2].textContent, /32\.0 min after you last loaded a page/);
+  assert.match(cards[2].textContent, /last server ping 4\.0 min earlier/);
+  cards.forEach(function (card) { assert.doesNotMatch(card.textContent, /undefined|NaN|null|Never/); });
 
   await e["copy-log"].listeners.click({ currentTarget: e["copy-log"] });
   assert.equal(popup.context.copied.split("\n").length, REAL_STATE.diagnosticLog.length);
@@ -139,29 +167,28 @@ test("the popup renders even the garbled scalars without throwing", async functi
   await settle();
   assert.deepEqual(popup.warnings, []);
   assert.equal(texts(popup.elements["diagnostic-log"]).length, 30);
-  assert.equal(texts(popup.elements["logout-records"]).length, 4);
+  assert.equal(popup.elements["logout-records"].children.length, 3);
 });
 
 test("one bad section or record never blanks the rest of the popup", async function () {
   var state = plausibleRealState();
   state.logoutRecords = [null, "junk", 7, { reason: 5 }].concat(state.logoutRecords);
   state.diagnosticLog = [null, "junk", { type: "status" }, { type: "nudge", at: "x" }].concat(state.diagnosticLog);
-  state.serverWarning = "not an object";
   state.sessionStatus = "logged-in";
   var popup = renderPopup(state);
   await settle();
   var e = popup.elements;
   assert.equal(texts(e["diagnostic-log"]).length, 30);
-  assert.ok(texts(e["logout-records"]).length >= 8);
-  assert.equal(e["server-warning"].hidden, true);
-  assert.equal(e.status.textContent, "Enabled — logged in");
+  assert.ok(e["logout-records"].children.length >= 7);
+  assert.equal(e.status.textContent, "Keeping you signed in");
+  assert.equal(e["status-block"].classList.contains("tone-ok"), true);
 
   // Not arrays at all: those two parts show their empty text, the rest renders.
   var broken = renderPopup({ logoutRecords: { a: 1 }, diagnosticLog: "oops", sessionStatus: "logged-out" });
   await settle();
   assert.equal(broken.elements["logout-records"].textContent, "No logged-out sessions detected yet.");
   assert.equal(broken.elements["diagnostic-log"].textContent, "No diagnostic entries yet.");
-  assert.equal(broken.elements.status.textContent, "Enabled — logged out");
+  assert.equal(broken.elements.status.textContent, "Signed out — log in to eRA again.");
 });
 
 test("a failing section shows its own message and the others still render", async function () {
@@ -170,19 +197,31 @@ test("a failing section shows its own message and the others still render", asyn
   await settle();
   // A formatter that throws stands in for any value the renderer cannot handle.
   var matcher = popup.context.EraKeepAlive;
-  var realFormatTime = matcher.formatTime;
-  matcher.formatTime = function () { throw new Error("boom"); };
-  popup.elements["logout-records"].textContent = "";
+  var realPopupStatus = matcher.popupStatus;
+  matcher.popupStatus = function () { throw new Error("boom"); };
   popup.context.render(state);
-  matcher.formatTime = realFormatTime;
+  matcher.popupStatus = realPopupStatus;
   assert.match(popup.elements.status.textContent, /^Could not show this part \(boom\)\.$/);
   assert.equal(texts(popup.elements["diagnostic-log"]).length, 30);
-  // Each record that cannot be read gets its own line; the list stays.
-  assert.deepEqual(texts(popup.elements["logout-records"]), [
-    "Logged out (this record could not be read)",
-    "Logged out (this record could not be read)",
-    "Logged out (this record could not be read)"
-  ]);
+  assert.equal(popup.elements["logout-records"].children.length, 3);
+
+  var realFormatTime = matcher.formatTime;
+  matcher.formatTime = function () { throw new Error("boom"); };
+  popup.context.render(state);
+  matcher.formatTime = realFormatTime;
+  assert.match(popup.elements.details.textContent, /^Could not show this part \(boom\)\.$/);
+  // The status pill does not use formatTime, so it still renders.
+  assert.equal(popup.elements.status.textContent, "Signed out — log in to eRA again.");
+
+  // Each record that cannot be read gets its own card; the list stays.
+  var realHeadline = matcher.logoutHeadline;
+  matcher.logoutHeadline = function () { throw new Error("boom"); };
+  popup.elements["logout-records"].textContent = "";
+  popup.context.render(state);
+  matcher.logoutHeadline = realHeadline;
+  var cards = popup.elements["logout-records"].children;
+  assert.equal(cards.length, 3);
+  cards.forEach(function (card) { assert.equal(card.textContent, "Logged out (this record could not be read)"); });
 });
 
 test("the ping switch shows on when nothing is stored, and a failed read still renders", async function () {
@@ -193,7 +232,7 @@ test("the ping switch shows on when nothing is stored, and a failed read still r
 
   var failed = renderPopup({}, { getFails: true });
   await settle();
-  assert.equal(failed.elements.status.textContent, "Enabled — status unknown");
+  assert.equal(failed.elements.status.textContent, "Status unknown");
   assert.equal(failed.elements["diagnostic-log"].textContent, "No diagnostic entries yet.");
 });
 
@@ -218,8 +257,9 @@ test("a server-ended record gets the keep-the-ping-on note in the popup", async 
     }]
   });
   await settle();
-  var records = texts(popup.elements["logout-records"]);
-  assert.equal(records[1], "eRA's server ended this session even though its page timer was still running. Keep \"Also ping eRA's server\" on.");
+  var card = popup.elements["logout-records"].children[0];
+  assert.match(card.textContent, /eRA's server ended it/);
+  assert.match(card.textContent, /Keep "Also ping eRA's server" on\./);
 });
 
 test("a server-ended session shows in the status line, with each session's length and eRA's apparent limit", async function () {
@@ -245,19 +285,20 @@ test("a server-ended session shows in the status line, with each session's lengt
   var e = popup.elements;
   var matcher = popup.context.EraKeepAlive;
   assert.deepEqual(popup.warnings, []);
-  assert.equal(e.status.textContent, "eRA's server ended your session at " + matcher.clockTime(latest.estimatedEndAt) +
-    " — 2 h 10 min after sign-in. Log in again.");
+  assert.equal(e.status.textContent, "Signed out — log in to eRA again. " + matcher.serverEndStatus(latest));
+  assert.equal(e["status-block"].classList.contains("tone-bad"), true);
   assert.equal(e["session-pattern"].hidden, false);
   assert.equal(e["session-pattern"].textContent, "eRA seems to end sessions about 2 h 9 min after sign-in (seen 2 times).");
-  var records = texts(e["logout-records"]);
-  assert.match(records[0], /session length 2 h 10 min/);
-  assert.match(records[1], /fixed session limit/);
-  assert.match(records[2], /session length 2 h 8 min/);
+  var cards = e["logout-records"].children;
+  assert.match(cards[0].textContent, /Session length 2 h 10 min/);
+  assert.match(cards[0].textContent, /fixed session limit/);
+  assert.match(cards[1].textContent, /Session length 2 h 8 min/);
 
   // Signed in again: the status line is the normal one; the pattern stays.
   var again = renderPopup({ sessionStatus: "logged-in", logoutRecords: [latest] });
   await settle();
-  assert.equal(again.elements.status.textContent, "Enabled — logged in");
+  assert.equal(again.elements.status.textContent, "Keeping you signed in");
+  assert.equal(again.elements["status-block"].classList.contains("tone-ok"), true);
   assert.equal(again.elements["session-pattern"].hidden, true);
 });
 
@@ -274,21 +315,49 @@ test("the status line names a server end only while that end is the current one"
   var current = renderPopup({ sessionStatus: "logged-out", serverEndedAt: endedAt, logoutRecords: [record] });
   await settle();
   matcher = current.context.EraKeepAlive;
-  assert.equal(current.elements.status.textContent, matcher.serverEndStatus(record));
+  assert.equal(current.elements.status.textContent, "Signed out — log in to eRA again. " + matcher.serverEndStatus(record));
 
   // Logged out again later without a new record (serverEndedAt cleared by a
   // sign-in in between), or serverEndedAt marking some other end: the old
   // record's time is not shown as current.
   var cleared = renderPopup({ sessionStatus: "logged-out", serverEndedAt: null, logoutRecords: [record] });
   await settle();
-  assert.equal(cleared.elements.status.textContent, "Enabled — logged out");
+  assert.equal(cleared.elements.status.textContent, "Signed out — log in to eRA again.");
   var other = renderPopup({ sessionStatus: "logged-out", serverEndedAt: endedAt + 3600000, logoutRecords: [record] });
   await settle();
-  assert.equal(other.elements.status.textContent, "Enabled — logged out");
+  assert.equal(other.elements.status.textContent, "Signed out — log in to eRA again.");
 
   // The latest record is a different kind of logout.
   var newer = { loggedOutDetectedAt: endedAt + 60000, reason: "eRA timer cookie deleted" };
   var notServer = renderPopup({ sessionStatus: "logged-out", serverEndedAt: endedAt, logoutRecords: [newer, record] });
   await settle();
-  assert.equal(notServer.elements.status.textContent, "Enabled — logged out");
+  assert.equal(notServer.elements.status.textContent, "Signed out — log in to eRA again.");
+});
+
+test("the 'eRA will log you out at' clause only appears when there is a future time to show", async function () {
+  var at = Date.UTC(2026, 8, 25, 16, 45);
+  var withTime = renderPopup({ sessionStatus: "logged-in", eraLogoutAt: at });
+  await settle();
+  assert.match(withTime.elements.status.textContent, /unless you stay active$/);
+
+  var withoutTime = renderPopup({ sessionStatus: "logged-in", eraLogoutAt: null });
+  await settle();
+  assert.equal(withoutTime.elements.status.textContent, "Keeping you signed in");
+  assert.doesNotMatch(withoutTime.elements.status.textContent, /Never/);
+});
+
+test("the server check-in detail row is off, accepted or refused, never a bare 'Never'", async function () {
+  var t = Date.UTC(2026, 8, 25, 15, 57);
+  var off = renderPopup({ pingServer: false });
+  await settle();
+  assert.equal(off.elements["server-checkin"].textContent, "Off");
+
+  var accepted = renderPopup({ pingServer: true, lastServerAcceptedAt: t });
+  await settle();
+  assert.equal(accepted.elements["server-checkin"].textContent, "Accepted at " + accepted.context.EraKeepAlive.clockTime(t));
+
+  var unknown = renderPopup({ pingServer: true });
+  await settle();
+  assert.equal(unknown.elements["dt-server-checkin"].hidden, true);
+  assert.equal(unknown.elements["server-checkin"].hidden, true);
 });

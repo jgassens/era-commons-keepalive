@@ -4,15 +4,15 @@
     <meta charset="utf-8">
     <title>Screenshot harness</title>
     <style>
-      /* Stage: centers the real popup on a plain 1280x800 canvas. */
-      html, body {
-        margin: 0;
-        padding: 0;
-        width: 1280px;
-        height: 800px;
-        background: #eef2f7;
-        font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      }
+      /* Two modes, picked by the "bare" query param:
+         - bare=1: nothing but the real popup, for tight popup-sized captures.
+         - default: the popup staged on a plain canvas with a caption, for
+           1280x800 store screenshots. */
+      html, body { margin: 0; padding: 0; background: #eef2f7; }
+      /* A color that never appears in the popup itself (light or dark), so
+         a screenshot script can crop to the popup's own bounds with
+         ImageMagick's -trim, however tall the content turns out to be. */
+      body.bare { background: #ff00ff; }
       .stage {
         width: 1280px;
         height: 800px;
@@ -22,120 +22,191 @@
         justify-content: center;
         box-sizing: border-box;
       }
+      body.bare .stage { all: unset; display: inline-block; padding: 12px; }
       .frame {
         background: #ffffff;
         border: 1px solid #d1d5db;
         border-radius: 10px;
         box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
-        width: 392px;
-        max-height: 660px;
         overflow: hidden;
       }
-      .caption {
-        margin-top: 18px;
-        font-size: 20px;
-        font-weight: 600;
-        color: #1f2937;
-      }
-
-      /* Below this line: popup.html's own <style> block, copied verbatim so
-         the popup renders exactly as it does in the real toolbar popup. */
-      .popup-styles { font: 14px/1.4 system-ui, sans-serif; width: 360px; color: #1f2937; }
-      h1 { font-size: 16px; margin: 0 0 14px; }
-      h1 small { display: block; font-size: 11px; font-weight: 400; color: #6b7280; margin-top: 2px; }
-      label { display: flex; align-items: center; gap: 8px; font-weight: 600; }
-      label + label { margin-top: 8px; font-weight: 400; }
-      input { width: 18px; height: 18px; }
-      dl { margin: 16px 0 0; }
-      dt { font-weight: 600; margin-top: 8px; }
-      dd { margin: 1px 0 0; color: #4b5563; }
-      h2 { font-size: 14px; margin: 20px 0 6px; }
-      #logout-records { margin: 0; padding-left: 20px; color: #4b5563; max-height: 190px; overflow: auto; }
-      #logout-records li { margin: 5px 0; }
-      #logout-records .logout-warning { color: #991b1b; }
-      details { margin-top: 16px; }
-      summary { cursor: pointer; font-weight: 600; }
-      #diagnostic-log { margin-top: 8px; max-height: 240px; overflow: auto; color: #4b5563; font: 11px/1.45 ui-monospace, monospace; }
-      #diagnostic-log div { margin: 4px 0; }
-      #copy-log { margin-top: 8px; padding: 5px 9px; }
-      #server-warning { margin: 12px 0 0; color: #92400e; }
-      #version { margin-top: 16px; color: #6b7280; font-size: 11px; }
+      body.bare .frame { all: unset; display: block; }
+      .caption { margin-top: 18px; font: 600 20px -apple-system, sans-serif; color: #1f2937; }
+      #popup-mount { display: contents; }
     </style>
   </head>
   <body>
     <div class="stage">
-      <div class="frame">
-        <div class="popup-styles" style="padding: 16px;">
-          <!-- Copied verbatim from popup.html's <body> so this is the real popup markup. -->
-          <h1>Session Keeper for eRA Commons <small>(unofficial, not affiliated with NIH/eRA)</small></h1>
-          <label><input id="enabled" type="checkbox"> Keep session active</label>
-          <label><input id="ping-server" type="checkbox"> Also ping eRA's server</label>
-          <dl>
-            <dt>Status</dt><dd id="status">Loading…</dd>
-            <dt>Signed in since</dt><dd id="signed-in">Not signed in</dd>
-            <dt>Last activity nudge</dt><dd id="last-nudge">Never</dd>
-            <dt>eRA will log you out at</dt><dd id="logout-at">Never</dd>
-            <dt>Last continued warning</dt><dd id="last-click">Never</dd>
-          </dl>
-          <p id="server-warning" hidden></p>
-          <details id="log-details">
-            <summary>Diagnostic log</summary>
-            <div id="diagnostic-log"></div>
-            <button id="copy-log" type="button">Copy log</button>
-          </details>
-          <h2>Recent logouts</h2>
-          <ul id="logout-records"></ul>
-          <div id="version"></div>
-        </div>
-      </div>
-      <div class="caption" id="caption">See exactly why eRA kept you signed in.</div>
+      <div class="frame"><div id="popup-mount"></div></div>
+      <div class="caption" id="caption"></div>
     </div>
     <script>
       "use strict";
-      // Query string can pick a different caption per screenshot, e.g.
-      // screenshot-harness.html?caption=Server%20ping%20on%20by%20default.
-      var params = new URLSearchParams(window.location.search);
-      var caption = params.get("caption");
-      if (caption) document.getElementById("caption").textContent = caption;
-      if (params.get("log") === "open") document.getElementById("log-details").open = true;
-
       var now = Date.parse("2026-09-25T15:00:00-05:00");
-      // Sample state shaped exactly like chrome.storage.local's real
-      // contents (see the `defaults` object at the top of popup.js).
-      var sampleState = {
-        enabled: true,
-        pingServer: true,
-        sessionStatus: "logged-in",
-        sessionStartedAt: now - 62 * 60 * 1000,
-        lastNudgeAt: now - 90 * 1000,
-        eraLogoutAt: now + 45 * 60 * 1000,
-        lastAutoClick: null,
-        serverWarning: null,
-        logoutRecords: [],
-        diagnosticLog: [
-          { at: now - 20 * 60 * 1000, type: "page-load", path: "/commons/public/index.jsp", managerPresent: true, minsLeft: 45.0 },
-          { at: now - 16 * 60 * 1000, type: "nudge", path: "/commonsplus/home.era", managerPresent: true, minsLeftBefore: 41.0, minsLeftAfter: 45.0, pingServer: true, serverCalled: true, serverStatus: 204 },
-          { at: now - 12 * 60 * 1000, type: "nudge", path: "/commonsplus/home.era", managerPresent: true, minsLeftBefore: 41.0, minsLeftAfter: 45.0, pingServer: true, serverCalled: true, serverStatus: 204 },
-          { at: now - 8 * 60 * 1000, type: "nudge", path: "/commonsplus/xtrain/list.era", managerPresent: true, minsLeftBefore: 40.8, minsLeftAfter: 45.0, pingServer: true, serverCalled: true, serverStatus: 204 },
-          { at: now - 90 * 1000, type: "nudge", path: "/commonsplus/home.era", managerPresent: true, minsLeftBefore: 41.0, minsLeftAfter: 45.0, pingServer: true, serverCalled: true, serverStatus: 204 }
-        ]
-      };
 
-      // A stub of just the chrome.* surface popup.js actually reads.
-      // src/matcher.js itself needs no chrome API and is loaded unmodified
-      // below, so all the real formatting logic runs, not a re-implementation.
-      window.chrome = {
-        runtime: { getManifest: function () { return { version: "1.4.3" }; } },
-        storage: {
-          local: {
-            get: function () { return Promise.resolve(sampleState); },
-            set: function () { return Promise.resolve(); }
-          },
-          onChanged: { addListener: function () {} }
+      // Sample states shaped exactly like chrome.storage.local's real
+      // contents (see the `defaults` object at the top of popup.js).
+      var SAMPLE_LOG = [
+        { at: now - 20 * 60 * 1000, type: "page-load", path: "/commons/public/index.jsp", managerPresent: true, minsLeft: 45.0 },
+        { at: now - 16 * 60 * 1000, type: "nudge", path: "/commonsplus/home.era", managerPresent: true, minsLeftBefore: 41.0, minsLeftAfter: 45.0, pingServer: true, serverCalled: true, serverStatus: 204 },
+        { at: now - 12 * 60 * 1000, type: "nudge", path: "/commonsplus/home.era", managerPresent: true, minsLeftBefore: 41.0, minsLeftAfter: 45.0, pingServer: true, serverCalled: true, serverStatus: 204 },
+        { at: now - 8 * 60 * 1000, type: "nudge", path: "/commonsplus/xtrain/list.era", managerPresent: true, minsLeftBefore: 40.8, minsLeftAfter: 45.0, pingServer: true, serverCalled: true, serverStatus: 204 },
+        { at: now - 90 * 1000, type: "nudge", path: "/commonsplus/home.era", managerPresent: true, minsLeftBefore: 41.0, minsLeftAfter: 45.0, pingServer: true, serverCalled: true, serverStatus: 204 }
+      ];
+
+      var SCENARIOS = {
+        "logged-in": {
+          enabled: true,
+          pingServer: true,
+          sessionStatus: "logged-in",
+          sessionStartedAt: now - 62 * 60 * 1000,
+          lastNudgeAt: now - 90 * 1000,
+          eraLogoutAt: now + 45 * 60 * 1000,
+          lastServerAcceptedAt: now - 90 * 1000,
+          lastAutoClick: null,
+          logoutRecords: [],
+          diagnosticLog: SAMPLE_LOG
+        },
+        "logged-out": {
+          enabled: true,
+          pingServer: true,
+          sessionStatus: "logged-out",
+          sessionStartedAt: null,
+          lastNudgeAt: now - 132 * 60 * 1000,
+          eraLogoutAt: null,
+          lastAutoClick: now - 200 * 60 * 1000,
+          serverEndedAt: now - 60 * 60 * 1000,
+          firstRefusalAt: now - 60 * 60 * 1000,
+          logoutRecords: [
+            {
+              loggedOutDetectedAt: now - 60 * 60 * 1000,
+              reason: "eRA's server ended the session (keep-alive refused)",
+              serverEnded: true,
+              sessionStartedAt: now - 190 * 60 * 1000,
+              minutesSinceSignIn: 130.5,
+              estimatedEndAt: now - 60.5 * 60 * 1000,
+              minutesSinceLastNudge: 1.8,
+              minutesLeftAtLastNudge: 45,
+              lastServerAcceptedAt: now - 64.5 * 60 * 1000,
+              pingServer: true,
+              lastServerPing: "server rejected (redirect)"
+            },
+            // An old v1.2.0-shape record: only the facts that version kept.
+            {
+              lastSuccessfulPingAt: now - 26 * 60 * 60 * 1000,
+              lastUserPageLoadAt: now - 26.6 * 60 * 60 * 1000,
+              loggedOutDetectedAt: now - 25.9 * 60 * 60 * 1000,
+              minutesSinceLastPageLoad: 42,
+              minutesSinceLastPing: 6
+            }
+          ],
+          diagnosticLog: SAMPLE_LOG
+        },
+        "idle": {
+          enabled: true,
+          pingServer: true,
+          sessionStatus: "idle",
+          sessionStartedAt: now - 40 * 60 * 1000,
+          lastNudgeAt: now - 15 * 60 * 1000,
+          eraLogoutAt: null,
+          lastAutoClick: null,
+          logoutRecords: [],
+          diagnosticLog: SAMPLE_LOG.slice(0, 2)
+        },
+        "off": {
+          enabled: false,
+          pingServer: true,
+          sessionStatus: "logged-in",
+          sessionStartedAt: now - 20 * 60 * 1000,
+          lastNudgeAt: now - 20 * 60 * 1000,
+          eraLogoutAt: now + 25 * 60 * 1000,
+          lastAutoClick: null,
+          logoutRecords: [],
+          diagnosticLog: []
         }
       };
+
+      function chromeStubScript(state) {
+        var manifest = { version: "1.5.2" };
+        return "<script>window.chrome = {" +
+          "runtime:{getManifest:function(){return " + JSON.stringify(manifest) + ";},getURL:function(p){return 'chrome-extension://preview/'+p;}}," +
+          "tabs:{create:function(){return Promise.resolve();}}," +
+          "storage:{local:{get:function(){return Promise.resolve(" + JSON.stringify(state) + ");},set:function(){return Promise.resolve();}},onChanged:{addListener:function(){}}}" +
+          "};<\/script>";
+      }
+
+      // Fetches the real popup.html, injects a <base> (so its relative
+      // script paths resolve against the repo root regardless of where this
+      // harness itself sits) and a chrome.* stub carrying the scenario's
+      // state, then mounts it. This renders the actual popup markup, CSS
+      // and script — nothing here is a re-implementation of the popup.
+      function mount(scenarioName, options) {
+        options = options || {};
+        var state = SCENARIOS[scenarioName];
+        if (!state) throw new Error("unknown scenario: " + scenarioName);
+        var base = new URL("../", location.href).href;
+        return fetch(base + "popup.html").then(function (response) { return response.text(); }).then(function (html) {
+          var headOpen = html.indexOf("<head>");
+          var inject = "<base href=\"" + base + "\">" + chromeStubScript(state);
+          html = html.slice(0, headOpen + 6) + inject + html.slice(headOpen + 6);
+          if (options.theme === "dark") {
+            html = html.replace("<html lang=\"en\">", "<html lang=\"en\" data-theme=\"dark\">");
+          }
+          var frame = document.getElementById("popup-mount");
+          var iframe = document.createElement("iframe");
+          iframe.style.border = "0";
+          iframe.style.display = "block";
+          iframe.width = "392";
+          iframe.height = "700";
+          frame.textContent = "";
+          frame.appendChild(iframe);
+          return new Promise(function (resolve) {
+            iframe.addEventListener("load", function () {
+              // Let popup.js's promise chain finish rendering, then size the
+              // iframe to the popup's own content height.
+              window.setTimeout(function () {
+                var doc = iframe.contentDocument;
+                // documentElement.scrollHeight cannot report less than the
+                // iframe's current (fixed) viewport height, so measure the
+                // popup's own <main> box instead — that always reflects its
+                // real content height.
+                var main = doc.querySelector("main");
+                var height = main ? Math.ceil(main.getBoundingClientRect().height) : doc.documentElement.scrollHeight;
+                iframe.height = String(height);
+                resolve(iframe);
+              }, 30);
+            });
+            iframe.srcdoc = html;
+          });
+        });
+      }
+
+      var params = new URLSearchParams(window.location.search);
+      var scenario = params.get("scenario") || "logged-in";
+      var bare = params.get("bare") === "1";
+      var openLog = params.get("log") === "open";
+      var caption = params.get("caption");
+      if (bare) {
+        document.body.classList.add("bare");
+        document.documentElement.style.background = "#ff00ff";
+      }
+      if (caption) document.getElementById("caption").textContent = caption;
+      else if (!bare) document.getElementById("caption").parentElement.removeChild(document.getElementById("caption"));
+
+      window.renderHarness = function () {
+        return mount(scenario, { theme: params.get("theme") }).then(function (iframe) {
+          if (openLog) {
+            var details = iframe.contentDocument.getElementById("log-details");
+            if (details) details.open = true;
+          }
+          document.title = "ready";
+          return iframe;
+        }, function (error) {
+          document.title = "error";
+          document.body.textContent = "harness error: " + (error && (error.stack || error.message) || error);
+        });
+      };
+      window.renderHarness();
     </script>
-    <script src="../src/matcher.js"></script>
-    <script src="../popup.js"></script>
   </body>
 </html>
