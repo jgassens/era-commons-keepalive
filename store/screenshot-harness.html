@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Screenshot harness</title>
+    <style>
+      /* Stage: centers the real popup on a plain 1280x800 canvas. */
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 1280px;
+        height: 800px;
+        background: #eef2f7;
+        font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      }
+      .stage {
+        width: 1280px;
+        height: 800px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        box-sizing: border-box;
+      }
+      .frame {
+        background: #ffffff;
+        border: 1px solid #d1d5db;
+        border-radius: 10px;
+        box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+        width: 380px;
+        max-height: 660px;
+        overflow: hidden;
+      }
+      .caption {
+        margin-top: 18px;
+        font-size: 20px;
+        font-weight: 600;
+        color: #1f2937;
+      }
+
+      /* Below this line: popup.html's own <style> block, copied verbatim so
+         the popup renders exactly as it does in the real toolbar popup. */
+      body.popup-styles { font: 14px/1.4 system-ui, sans-serif; margin: 16px; min-width: 260px; color: #1f2937; }
+      h1 { font-size: 16px; margin: 0 0 14px; }
+      h1 small { display: block; font-size: 11px; font-weight: 400; color: #6b7280; margin-top: 2px; }
+      label { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+      label + label { margin-top: 8px; font-weight: 400; }
+      input { width: 18px; height: 18px; }
+      dl { margin: 16px 0 0; }
+      dt { font-weight: 600; margin-top: 8px; }
+      dd { margin: 1px 0 0; color: #4b5563; }
+      h2 { font-size: 14px; margin: 20px 0 6px; }
+      #logout-records { margin: 0; padding-left: 20px; color: #4b5563; }
+      #logout-records li { margin: 5px 0; }
+      #logout-records .logout-warning { color: #991b1b; }
+      details { margin-top: 18px; }
+      summary { cursor: pointer; font-weight: 600; }
+      #diagnostic-log { margin-top: 8px; max-height: 240px; overflow: auto; color: #4b5563; font: 11px/1.45 ui-monospace, monospace; }
+      #diagnostic-log div { margin: 4px 0; }
+      #copy-log { margin-top: 8px; padding: 5px 9px; }
+      #server-warning { margin: 12px 0 0; color: #92400e; }
+      #version { margin-top: 16px; color: #6b7280; font-size: 11px; }
+    </style>
+  </head>
+  <body>
+    <div class="stage">
+      <div class="frame">
+        <div class="popup-styles" style="padding: 16px;">
+          <!-- Copied verbatim from popup.html's <body> so this is the real popup markup. -->
+          <h1>Session Keeper for eRA Commons <small>(unofficial, not affiliated with NIH/eRA)</small></h1>
+          <label><input id="enabled" type="checkbox"> Keep session active</label>
+          <label><input id="ping-server" type="checkbox"> Also ping eRA's server</label>
+          <dl>
+            <dt>Status</dt><dd id="status">Loading…</dd>
+            <dt>Signed in since</dt><dd id="signed-in">Not signed in</dd>
+            <dt>Last activity nudge</dt><dd id="last-nudge">Never</dd>
+            <dt>eRA will log you out at</dt><dd id="logout-at">Never</dd>
+            <dt>Last continued warning</dt><dd id="last-click">Never</dd>
+          </dl>
+          <p id="server-warning" hidden></p>
+          <h2>Recent logouts</h2>
+          <ul id="logout-records"></ul>
+          <details id="log-details">
+            <summary>Diagnostic log</summary>
+            <div id="diagnostic-log"></div>
+            <button id="copy-log" type="button">Copy log</button>
+          </details>
+          <div id="version"></div>
+        </div>
+      </div>
+      <div class="caption" id="caption">See exactly why eRA kept you signed in.</div>
+    </div>
+    <script>
+      "use strict";
+      // Query string can pick a different caption per screenshot, e.g.
+      // screenshot-harness.html?caption=Off%20by%20default.
+      var params = new URLSearchParams(window.location.search);
+      var caption = params.get("caption");
+      if (caption) document.getElementById("caption").textContent = caption;
+      if (params.get("log") === "open") document.getElementById("log-details").open = true;
+
+      var now = Date.parse("2026-09-25T15:00:00-05:00");
+      // Sample state shaped exactly like chrome.storage.local's real
+      // contents (see the `defaults` object at the top of popup.js).
+      var sampleState = {
+        enabled: true,
+        pingServer: false,
+        sessionStatus: "logged-in",
+        sessionStartedAt: now - 62 * 60 * 1000,
+        lastNudgeAt: now - 90 * 1000,
+        eraLogoutAt: now + 45 * 60 * 1000,
+        lastAutoClick: null,
+        serverWarning: null,
+        logoutRecords: [
+          {
+            loggedOutDetectedAt: now - 5 * 60 * 60 * 1000,
+            reason: "eRA timer cookie expired",
+            minutesSinceSignIn: 138.4,
+            minutesSinceLastNudge: 46.1,
+            minutesSinceLastPageLoad: 51.7,
+            minutesLeftAtLastNudge: 44.8,
+            pingServer: false,
+            lastServerPing: "server not called (ping off)"
+          }
+        ],
+        diagnosticLog: [
+          { at: now - 20 * 60 * 1000, type: "page-load", path: "/commons/public/index.jsp", managerPresent: true, minsLeft: 45.0 },
+          { at: now - 16 * 60 * 1000, type: "nudge", path: "/commonsplus/home.era", managerPresent: true, minsLeftBefore: 41.0, minsLeftAfter: 45.0, pingServer: false },
+          { at: now - 12 * 60 * 1000, type: "nudge", path: "/commonsplus/home.era", managerPresent: true, minsLeftBefore: 41.0, minsLeftAfter: 45.0, pingServer: false },
+          { at: now - 8 * 60 * 1000, type: "nudge", path: "/commonsplus/xtrain/list.era", managerPresent: true, minsLeftBefore: 40.8, minsLeftAfter: 45.0, pingServer: false },
+          { at: now - 90 * 1000, type: "nudge", path: "/commonsplus/home.era", managerPresent: true, minsLeftBefore: 41.0, minsLeftAfter: 45.0, pingServer: false }
+        ]
+      };
+
+      // A stub of just the chrome.* surface popup.js actually reads.
+      // src/matcher.js itself needs no chrome API and is loaded unmodified
+      // below, so all the real formatting logic runs, not a re-implementation.
+      window.chrome = {
+        runtime: { getManifest: function () { return { version: "1.4.2" }; } },
+        storage: {
+          local: {
+            get: function () { return Promise.resolve(sampleState); },
+            set: function () { return Promise.resolve(); }
+          },
+          onChanged: { addListener: function () {} }
+        }
+      };
+    </script>
+    <script src="../src/matcher.js"></script>
+    <script src="../popup.js"></script>
+  </body>
+</html>

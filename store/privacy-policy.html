@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Privacy Policy — Session Keeper for eRA Commons (unofficial)</title>
+    <style>
+      :root { color-scheme: light; }
+      body {
+        margin: 0;
+        padding: 24px 16px 64px;
+        max-width: 680px;
+        margin-left: auto;
+        margin-right: auto;
+        font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        color: #1f2937;
+        background: #ffffff;
+      }
+      h1 { font-size: 22px; line-height: 1.3; margin: 0 0 4px; }
+      h2 { font-size: 17px; margin: 28px 0 8px; }
+      p { margin: 0 0 12px; }
+      ul { margin: 0 0 12px; padding-left: 22px; }
+      li { margin: 4px 0; }
+      .updated { color: #6b7280; font-size: 14px; margin-bottom: 24px; }
+      .notice {
+        background: #fef3c7;
+        border: 1px solid #f59e0b;
+        border-radius: 8px;
+        padding: 10px 14px;
+        font-size: 14px;
+        margin: 0 0 24px;
+      }
+      code {
+        background: #f3f4f6;
+        border-radius: 4px;
+        padding: 1px 5px;
+        font: 13px/1.4 ui-monospace, monospace;
+      }
+      footer { margin-top: 40px; color: #6b7280; font-size: 13px; }
+      @media (max-width: 480px) {
+        body { padding: 16px 12px 48px; }
+        h1 { font-size: 20px; }
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Privacy Policy — Session Keeper for eRA Commons (unofficial)</h1>
+    <p class="updated">Last updated: September 25, 2026</p>
+
+    <p class="notice">
+      This extension is <strong>unofficial</strong> and is <strong>not made by,
+      operated by, or affiliated with NIH or eRA Commons</strong> in any way.
+      It is a small independent browser add-on that helps keep your own,
+      already-signed-in eRA Commons session from timing out.
+    </p>
+
+    <h2>Who made this</h2>
+    <p>
+      Maintainer: <em>[YOUR NAME HERE]</em><br>
+      Contact: <em>[YOUR CONTACT EMAIL HERE]</em>
+    </p>
+
+    <h2>What this extension does</h2>
+    <p>
+      While it is turned on and an eRA Commons browser tab is open, it sends
+      that page a harmless scroll signal every four minutes so eRA's own page
+      script treats you as active, and it presses eRA's own on-screen
+      "Continue" button if a timeout warning appears. That is the whole job.
+    </p>
+
+    <h2>What data it handles</h2>
+    <p>Everything below stays on your own computer, in your own browser's
+      local storage. It is never uploaded to a server, never shared with any
+      third party, and there is no account, sign-in, or analytics system
+      run by the maintainer.</p>
+    <ul>
+      <li><strong>Session status and timestamps</strong> — whether you appear
+        signed in, and the last few times the extension nudged the page or
+        clicked a warning.</li>
+      <li><strong>eRA's own timeout cookie</strong> (<code>ERA_SESSION_TIMEOUT_COOKIE</code>)
+        — read only to know when eRA itself will end your session, and
+        watched only to notice the moment eRA deletes it (which is how eRA
+        signals that you have been logged out). The extension only looks at
+        this one cookie's name and expiry time; it does not read or store
+        any other cookie, on eRA or anywhere else.</li>
+      <li><strong>A local diagnostic log</strong> — up to 200 lines of page
+        paths (with any query string, page fragment, or session ID
+        stripped out), timestamps, and short event descriptions, kept only
+        so you can see what the extension has been doing. It never records
+        page content, form fields, or credentials of any kind.</li>
+    </ul>
+
+    <h2>What it never does</h2>
+    <ul>
+      <li>It never logs you in, and cannot log you in on your behalf.</li>
+      <li>It never reads, stores, fills in, or transmits your username,
+        password, two-factor code, or any other credential.</li>
+      <li>It does not use analytics, tracking pixels, or any third-party
+        service.</li>
+      <li>It does not run any code that is downloaded at runtime — every
+        script it runs ships inside the extension package itself.</li>
+    </ul>
+
+    <h2>The one optional network call</h2>
+    <p>
+      The popup has a switch, off by default, labeled "Also ping eRA's
+      server." If you turn it on yourself, the extension will additionally
+      call eRA's own keep-alive web address directly — the same address
+      eRA's own page already calls on its own every 40 minutes — so it can
+      tell you whether eRA's server or eRA's page timer ended a session.
+      This call goes only to an <code>https://*.era.nih.gov</code> address
+      that eRA itself already serves; it never goes anywhere else, and the
+      extension works fine with this switch left off.
+    </p>
+
+    <h2>How to delete your data</h2>
+    <p>
+      Everything this extension stores lives inside Chrome's per-extension
+      local storage. Removing the extension (<code>chrome://extensions</code>
+      → Remove) deletes all of it immediately. Nothing survives anywhere
+      else, because nothing was ever sent anywhere else.
+    </p>
+
+    <h2>Changes to this policy</h2>
+    <p>
+      If this policy changes, the "Last updated" date at the top of this
+      page will change with it.
+    </p>
+
+    <footer>
+      Session Keeper for eRA Commons (unofficial) — an independent project,
+      not affiliated with NIH or eRA.
+    </footer>
+  </body>
+</html>

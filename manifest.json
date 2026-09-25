@@ -1,15 +1,15 @@
 {
   "manifest_version": 3,
-  "name": "eRA Commons Keep Alive",
-  "version": "1.4.1",
-  "description": "Keeps your own eRA Commons session active while enabled.",
+  "name": "Session Keeper for eRA Commons (unofficial)",
+  "version": "1.4.2",
+  "description": "Unofficial helper that keeps your own NIH eRA Commons session from timing out while an eRA tab is open.",
   "permissions": ["storage", "alarms", "notifications", "scripting", "cookies"],
   "host_permissions": ["https://*.era.nih.gov/*"],
   "background": {
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "eRA Commons Keep Alive",
+    "default_title": "Session Keeper for eRA Commons (unofficial)",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",
