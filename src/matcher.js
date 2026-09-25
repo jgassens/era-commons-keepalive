@@ -78,7 +78,7 @@
       var parsed = new URL(String(url || ""));
       var hostname = parsed.hostname.toLowerCase();
       return hostname === "login.gov" || /\.login\.gov$/.test(hostname) ||
-        /(?:^|\/)login-type(?:\/|$)/i.test(parsed.pathname);
+        /(?:^|\/)(?:login|signin|sign-in|logout|logged-out|sessiontimeout|timeout)/i.test(parsed.pathname);
     } catch (error) {
       return false;
     }

@@ -45,6 +45,32 @@ test("detects login-page redirects and strong logged-out page text", function ()
   assert.equal(matcher.isLoginPage("https://public.era.nih.gov/commons/home", "Welcome to eRA Commons"), false);
 });
 
+test("detects login-related pathname segments and login.gov hosts", function () {
+  [
+    "https://public.era.nih.gov/commons/public/login.do",
+    "https://public.era.nih.gov/login",
+    "https://public.era.nih.gov/signin?x=1",
+    "https://public.era.nih.gov/era/Logout.jsp",
+    "https://public.era.nih.gov/account/sign-in-now",
+    "https://public.era.nih.gov/sessiontimeout-warning",
+    "https://public.era.nih.gov/timeout-page",
+    "https://login.gov/",
+    "https://secure.login.gov/"
+  ].forEach(function (url) {
+    assert.equal(matcher.isLoginUrl(url), true, url);
+  });
+});
+
+test("only checks pathname segments, not unrelated paths or query strings", function () {
+  [
+    "/commons/",
+    "/commons/personProfile",
+    "/commons/help?topic=login"
+  ].forEach(function (url) {
+    assert.equal(matcher.isLoginUrl("https://public.era.nih.gov" + url), false, url);
+  });
+});
+
 test("does not treat Login.gov text on a page with a logout control as logged out", function () {
   assert.equal(
     matcher.isLoginPage(
