@@ -8,6 +8,7 @@
       body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; min-width: 260px; color: #1f2937; }
       h1 { font-size: 16px; margin: 0 0 14px; }
       label { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+      label + label { margin-top: 8px; font-weight: 400; }
       input { width: 18px; height: 18px; }
       dl { margin: 16px 0 0; }
       dt { font-weight: 600; margin-top: 8px; }
@@ -27,8 +28,10 @@
   <body>
     <h1>eRA Commons Keep Alive</h1>
     <label><input id="enabled" type="checkbox"> Keep session active</label>
+    <label><input id="ping-server" type="checkbox"> Also ping eRA's server</label>
     <dl>
       <dt>Status</dt><dd id="status">Loading…</dd>
+      <dt>Signed in since</dt><dd id="signed-in">Not signed in</dd>
       <dt>Last activity nudge</dt><dd id="last-nudge">Never</dd>
       <dt>eRA will log you out at</dt><dd id="logout-at">Never</dd>
       <dt>Last continued warning</dt><dd id="last-click">Never</dd>

@@ -2,7 +2,9 @@
 
 var defaults = {
   enabled: true,
+  pingServer: false,
   sessionStatus: "unknown",
+  sessionStartedAt: null,
   lastNudgeAt: null,
   eraLogoutAt: null,
   lastAutoClick: null,
@@ -10,26 +12,13 @@ var defaults = {
   diagnosticLog: []
 };
 var enabled = document.getElementById("enabled");
+var pingServer = document.getElementById("ping-server");
 var matcher = globalThis.EraKeepAlive;
 var currentLog = [];
 document.getElementById("version").textContent = "Version " + chrome.runtime.getManifest().version;
 
-function formatTime(value) {
-  return value ? new Date(value).toLocaleString() : "Never";
-}
-
-function formatShortTime(value) {
-  return new Date(value).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-}
-
-function formatMinutes(minutes, fallback) {
-  if (minutes === null || typeof minutes === "undefined") return fallback;
-  return minutes + " min";
-}
-
-function hasRecentNudge(record) {
-  return record.lastNudgeAt !== null &&
-    record.loggedOutDetectedAt - record.lastNudgeAt < 5 * 60 * 1000;
+function minutesText(minutes, fallback) {
+  return matcher.formatMinutes(minutes) || fallback;
 }
 
 function renderLogoutRecords(records) {
@@ -41,20 +30,23 @@ function renderLogoutRecords(records) {
   }
   records.forEach(function (record) {
     var item = document.createElement("li");
-    item.textContent = "Logged out " + formatShortTime(record.loggedOutDetectedAt) + " — " +
-      formatMinutes(record.minutesSinceLastNudge, "no activity nudge recorded") +
+    var server = record.lastServerPing ||
+      (typeof record.lastServerPingStatus === "number" ? "server " + record.lastServerPingStatus : null) ||
+      (record.pingServer ? "no server ping recorded" : "server not called (ping off)");
+    item.textContent = "Logged out " + matcher.formatTime(record.loggedOutDetectedAt) +
+      (record.reason ? " (" + record.reason + ")" : "") + " — " +
+      minutesText(record.minutesSinceSignIn, "unknown time") + " after sign-in, " +
+      minutesText(record.minutesSinceLastNudge, "no activity nudge recorded") +
       " after last activity nudge, " +
-      formatMinutes(record.minutesSinceLastPageLoad, "page-load time unavailable") +
+      minutesText(record.minutesSinceLastPageLoad, "page-load time unavailable") +
       " after you last loaded a page; eRA timer at last nudge: " +
-      formatMinutes(record.minutesLeftAtLastNudge, "unavailable") +
-      "; last server ping: " +
-      (record.lastServerPingStatus === null || typeof record.lastServerPingStatus === "undefined" ?
-        "unavailable" : record.lastServerPingStatus);
+      minutesText(record.minutesLeftAtLastNudge, "unavailable") + "; " + server;
     container.appendChild(item);
-    if (hasRecentNudge(record)) {
+    if (typeof record.minutesLeftAtLastNudge === "number" && record.minutesLeftAtLastNudge >= 10) {
       var warning = document.createElement("li");
       warning.className = "logout-warning";
-      warning.textContent = "eRA ended this session despite a recent activity nudge - it may have a hard time limit or may not count the nudge as activity.";
+      warning.textContent = "eRA's own timer still had " + minutesText(record.minutesLeftAtLastNudge) +
+        " left — the session was ended by something else (server or a hard limit).";
       container.appendChild(warning);
     }
   });
@@ -77,12 +69,15 @@ function renderDiagnosticLog(entries) {
 
 function render(state) {
   enabled.checked = state.enabled;
+  pingServer.checked = state.pingServer;
   document.getElementById("status").textContent = !state.enabled ? "Disabled" :
     state.sessionStatus === "logged-in" ? "Enabled — logged in" :
     state.sessionStatus === "logged-out" ? "Enabled — logged out" : "Enabled — status unknown";
-  document.getElementById("last-nudge").textContent = formatTime(state.lastNudgeAt);
-  document.getElementById("logout-at").textContent = formatTime(state.eraLogoutAt);
-  document.getElementById("last-click").textContent = formatTime(state.lastAutoClick);
+  document.getElementById("signed-in").textContent =
+    state.sessionStatus === "logged-in" ? matcher.formatTime(state.sessionStartedAt) : "Not signed in";
+  document.getElementById("last-nudge").textContent = matcher.formatTime(state.lastNudgeAt);
+  document.getElementById("logout-at").textContent = matcher.formatTime(state.eraLogoutAt);
+  document.getElementById("last-click").textContent = matcher.formatTime(state.lastAutoClick);
   renderLogoutRecords(state.logoutRecords || []);
   renderDiagnosticLog(state.diagnosticLog || []);
 }
@@ -91,11 +86,18 @@ chrome.storage.local.get(defaults).then(render);
 enabled.addEventListener("change", function () {
   chrome.storage.local.set({ enabled: enabled.checked });
 });
+pingServer.addEventListener("change", function () {
+  chrome.storage.local.set({ pingServer: pingServer.checked });
+});
 document.getElementById("copy-log").addEventListener("click", async function (event) {
   var button = event.currentTarget;
   var text = currentLog.map(matcher.formatLogLine).join("\n");
-  await navigator.clipboard.writeText(text);
-  button.textContent = "Copied";
+  try {
+    await navigator.clipboard.writeText(text);
+    button.textContent = "Copied";
+  } catch (error) {
+    button.textContent = "Copy failed";
+  }
   window.setTimeout(function () { button.textContent = "Copy log"; }, 1500);
 });
 chrome.storage.onChanged.addListener(function (changes, area) {

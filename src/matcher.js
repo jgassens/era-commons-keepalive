@@ -109,10 +109,18 @@
     return null;
   }
 
+  // eRA sometimes appends ";jsessionid=..." path parameters to a segment.
+  // They carry a session identifier, so they are removed from every segment.
+  function stripPathParameters(pathname) {
+    return String(pathname || "").split("/").map(function (segment) {
+      return segment.split(";")[0];
+    }).join("/");
+  }
+
   function isEraLogoutUrl(url) {
     try {
       var parsed = new URL(String(url || ""));
-      return /\/authi\/public\/do$/i.test(parsed.pathname) &&
+      return /\/authi\/public\/do$/i.test(stripPathParameters(parsed.pathname)) &&
         String(parsed.searchParams.get("action") || "").toLowerCase() === "logout";
     } catch (error) {
       return false;
@@ -124,16 +132,11 @@
       var parsed = new URL(String(url || ""));
       var hostname = parsed.hostname.toLowerCase();
       return hostname === "login.gov" || /\.login\.gov$/.test(hostname) ||
-        /\/public\/login\.era$/i.test(parsed.pathname) || isEraLogoutUrl(parsed.href);
+        /\/public\/login\.(?:era|jsp|do)$/i.test(stripPathParameters(parsed.pathname)) ||
+        isEraLogoutUrl(parsed.href);
     } catch (error) {
       return false;
     }
-  }
-
-  function isLoginPage(url, visibleText, hasLogoutControl) {
-    var text = String(visibleText || "").replace(/\s+/g, " ").trim();
-    var loggedOutText = /\byou\s+have\s+been\s+logged\s+out\b|\byour\s+session\s+has\s+(?:expired|ended|timed\s+out)\b|\bsession\s+expired\b/i.test(text);
-    return isLoginUrl(url) || (loggedOutText && !hasLogoutControl);
   }
 
   function isIgnoredEraUrl(url) {
@@ -147,12 +150,14 @@
   }
 
   function safePath(url) {
+    var path;
     try {
-      return new URL(String(url || "")).pathname || "/";
+      path = new URL(String(url || "")).pathname;
     } catch (error) {
-      var path = String(url || "").split(/[?#]/)[0];
-      return path.charAt(0) === "/" ? path : "/";
+      path = String(url || "").split(/[?#]/)[0];
     }
+    path = stripPathParameters(path);
+    return path.charAt(0) === "/" ? path : "/";
   }
 
   function buildKeepSessionAliveUrl(baseUrl, currentAppName, pageUrl) {
@@ -169,24 +174,70 @@
     }
   }
 
-  function deriveSessionStatus(results) {
+  function hasLiveCookie(result) {
+    return typeof result.minsLeftBefore === "number" && result.minsLeftBefore > 0;
+  }
+
+  // The one place that decides what a tab result says about the session.
+  // Returns { classification: "active" | "ended" | "neutral", reason }.
+  // priorStatus matters only for a missing or expired cookie: that ends the
+  // session only when the extension had already seen it logged in.
+  function explainTabResult(result, priorStatus) {
+    if (!result || result.ignored) return { classification: "neutral", reason: "ignored page" };
+    if (result.unreachable) return { classification: "neutral", reason: "could not reach tab" };
+    if (result.isLoginPage) return { classification: "ended", reason: "login or logout page" };
+    if (result.serverRedirectedToLogin) return { classification: "ended", reason: "server redirected to login" };
+    if (result.serverRejected) return { classification: "ended", reason: "server rejected keep-alive (redirect)" };
+    var live = hasLiveCookie(result);
+    if (result.managerPresent && live) return { classification: "active", reason: "live eRA timer" };
+    if (!live && priorStatus === "logged-in") {
+      return {
+        classification: "ended",
+        reason: typeof result.minsLeftBefore === "number" ? "cookie expired" : "cookie deleted"
+      };
+    }
+    return { classification: "neutral", reason: live ? "no timeout manager" : "no live eRA timer" };
+  }
+
+  function classifyTabResult(result, priorStatus) {
+    return explainTabResult(result, priorStatus).classification;
+  }
+
+  function deriveSessionStatus(results, priorStatus) {
     var relevant = (results || []).filter(function (result) {
       return result && !result.ignored;
     });
-    if (relevant.some(function (result) {
-      return !result.isLoginPage && !result.serverRedirectedToLogin && result.managerPresent &&
-        ((typeof result.minsLeftAfter === "number" && result.minsLeftAfter > 0) ||
-          (typeof result.minsLeftBefore === "number" && result.minsLeftBefore > 0));
-    })) return "logged-in";
-    if (relevant.length && relevant.every(function (result) {
-      return result.isLoginPage || result.serverRedirectedToLogin ||
-        (typeof result.minsLeftBefore === "number" && result.minsLeftBefore <= 0);
-    })) return "logged-out";
+    // No eRA tabs to judge by: the caller decides what that means, so keep prior.
+    if (!relevant.length) return priorStatus || "unknown";
+    var classes = relevant.map(function (result) {
+      return classifyTabResult(result, priorStatus);
+    });
+    if (classes.indexOf("active") !== -1) return "logged-in";
+    if (classes.indexOf("ended") !== -1) return "logged-out";
     return "unknown";
   }
 
+  function roundMinutes(value) {
+    return typeof value === "number" && Number.isFinite(value) ? Math.round(value * 10) / 10 : null;
+  }
+
   function oneDecimal(value) {
-    return typeof value === "number" && Number.isFinite(value) ? value.toFixed(1) : null;
+    var rounded = roundMinutes(value);
+    return rounded === null ? null : rounded.toFixed(1);
+  }
+
+  // "12.3 min", or null when there is no number to show.
+  function formatMinutes(value) {
+    var text = oneDecimal(value);
+    return text === null ? null : text + " min";
+  }
+
+  // Date and time for the popup; "Never" when there is no time.
+  function formatTime(value) {
+    if (value === null || typeof value === "undefined") return "Never";
+    var date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return "Never";
+    return date.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
   }
 
   function shortTime(value) {
@@ -195,30 +246,48 @@
     return String(date.getHours()).padStart(2, "0") + ":" + String(date.getMinutes()).padStart(2, "0");
   }
 
+  function describeServer(entry) {
+    entry = entry || {};
+    if (entry.serverError) return "server error";
+    if (entry.serverRejected) return "server rejected (redirect)";
+    if (entry.serverRedirectedToLogin) return "server redirected to login";
+    if (typeof entry.serverStatus === "number") return "server " + entry.serverStatus;
+    if (entry.pingServer === false) return "server not called (ping off)";
+    return "server not called";
+  }
+
+  function describeCookie(before, after) {
+    if (typeof before !== "number") return "cookie deleted";
+    var text = "cookie " + oneDecimal(before);
+    if (typeof after === "number" && oneDecimal(after) !== oneDecimal(before)) text += " -> " + oneDecimal(after);
+    return text + " min" + (before <= 0 ? " (expired)" : "");
+  }
+
   function formatLogLine(entry) {
     entry = entry || {};
     var prefix = shortTime(entry.at) + " ";
     var path = safePath(entry.path || "/");
     if (entry.type === "nudge") {
-      var detail;
-      if (!entry.managerPresent) detail = "timeout manager not present";
-      else if (entry.minsLeftBefore === null || typeof entry.minsLeftBefore === "undefined") detail = "timer missing";
-      else if (entry.minsLeftBefore <= 0) detail = "timer expired (" + oneDecimal(entry.minsLeftBefore) + " min)";
-      else detail = "timer " + oneDecimal(entry.minsLeftBefore) + " -> " + oneDecimal(entry.minsLeftAfter) + " min";
-      var server = entry.serverStatus === null || typeof entry.serverStatus === "undefined" ?
-        "server not called" : "server " + entry.serverStatus;
-      if (entry.serverRedirectedToLogin) server += " (login redirect)";
-      return prefix + "nudge " + path + ": " + detail + ", " + server;
+      if (entry.unreachable) return prefix + "nudge " + path + ": could not reach tab (reload it)";
+      var detail = (entry.managerPresent ? "" : "no timeout manager, ") +
+        describeCookie(entry.minsLeftBefore, entry.minsLeftAfter);
+      return prefix + "nudge " + path + ": " + detail + ", " + describeServer(entry);
     }
     if (entry.type === "page-load") {
-      var pageDetail = !entry.managerPresent ? "timeout manager not present" :
-        entry.minsLeft === null || typeof entry.minsLeft === "undefined" ? "timer missing" :
-          "timer " + oneDecimal(entry.minsLeft) + " min";
+      var pageDetail = entry.isLoginPage ? "login or logout page" :
+        (entry.managerPresent ? "" : "no timeout manager, ") + describeCookie(entry.minsLeft);
       return prefix + "page load " + path + ": " + pageDetail;
     }
     if (entry.type === "status") {
       return prefix + "status " + entry.from + " -> " + entry.to + ": " +
         String(entry.reason || "status changed") + (entry.path ? " (" + path + ")" : "");
+    }
+    if (entry.type === "no-tabs") {
+      return prefix + "no eRA tabs open" +
+        (entry.from && entry.from !== "unknown" ? " (status " + entry.from + " -> unknown)" : "");
+    }
+    if (entry.type === "alarm-late") {
+      return prefix + "alarm late by " + oneDecimal(entry.minutesLate) + " min (computer asleep?)";
     }
     if (entry.type === "auto-click") return prefix + "continued timeout warning " + path;
     return prefix + String(entry.type || "event") + " " + path;
@@ -233,11 +302,16 @@
     parseEraLogoutAt: parseEraLogoutAt,
     isEraLogoutUrl: isEraLogoutUrl,
     isLoginUrl: isLoginUrl,
-    isLoginPage: isLoginPage,
     isIgnoredEraUrl: isIgnoredEraUrl,
     safePath: safePath,
     buildKeepSessionAliveUrl: buildKeepSessionAliveUrl,
+    explainTabResult: explainTabResult,
+    classifyTabResult: classifyTabResult,
     deriveSessionStatus: deriveSessionStatus,
+    roundMinutes: roundMinutes,
+    formatMinutes: formatMinutes,
+    formatTime: formatTime,
+    describeServer: describeServer,
     formatLogLine: formatLogLine
   };
 });
