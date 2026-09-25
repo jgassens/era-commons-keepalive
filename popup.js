@@ -9,6 +9,7 @@ var defaults = {
   logoutRecords: []
 };
 var enabled = document.getElementById("enabled");
+document.getElementById("version").textContent = "Version " + chrome.runtime.getManifest().version;
 
 function formatTime(value) {
   return value ? new Date(value).toLocaleString() : "Never";
