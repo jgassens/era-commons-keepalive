@@ -3,7 +3,8 @@
 var defaults = {
   enabled: true,
   sessionStatus: "unknown",
-  lastSuccessfulPingAt: null,
+  lastNudgeAt: null,
+  eraLogoutAt: null,
   lastAutoClick: null,
   logoutRecords: []
 };
@@ -22,9 +23,9 @@ function formatMinutes(minutes, fallback) {
   return minutes + " min";
 }
 
-function hasRecentPing(record) {
-  return record.lastSuccessfulPingAt !== null &&
-    record.loggedOutDetectedAt - record.lastSuccessfulPingAt < 5 * 60 * 1000;
+function hasRecentNudge(record) {
+  return record.lastNudgeAt !== null &&
+    record.loggedOutDetectedAt - record.lastNudgeAt < 5 * 60 * 1000;
 }
 
 function renderLogoutRecords(records) {
@@ -37,15 +38,15 @@ function renderLogoutRecords(records) {
   records.forEach(function (record) {
     var item = document.createElement("li");
     item.textContent = "Logged out " + formatShortTime(record.loggedOutDetectedAt) + " — " +
-      formatMinutes(record.minutesSinceLastPing, "no successful check recorded") +
-      " after last check, " +
+      formatMinutes(record.minutesSinceLastNudge, "no activity nudge recorded") +
+      " after last activity nudge, " +
       formatMinutes(record.minutesSinceLastPageLoad, "page-load time unavailable") +
       " after you last loaded a page";
     container.appendChild(item);
-    if (hasRecentPing(record)) {
+    if (hasRecentNudge(record)) {
       var warning = document.createElement("li");
       warning.className = "logout-warning";
-      warning.textContent = "eRA ended this session despite recent activity - it may have a hard time limit or the check is not counting as activity.";
+      warning.textContent = "eRA ended this session despite a recent activity nudge - it may have a hard time limit or may not count the nudge as activity.";
       container.appendChild(warning);
     }
   });
@@ -56,7 +57,8 @@ function render(state) {
   document.getElementById("status").textContent = !state.enabled ? "Disabled" :
     state.sessionStatus === "logged-in" ? "Enabled — logged in" :
     state.sessionStatus === "logged-out" ? "Enabled — logged out" : "Enabled — status unknown";
-  document.getElementById("last-ping").textContent = formatTime(state.lastSuccessfulPingAt);
+  document.getElementById("last-nudge").textContent = formatTime(state.lastNudgeAt);
+  document.getElementById("logout-at").textContent = formatTime(state.eraLogoutAt);
   document.getElementById("last-click").textContent = formatTime(state.lastAutoClick);
   renderLogoutRecords(state.logoutRecords || []);
 }

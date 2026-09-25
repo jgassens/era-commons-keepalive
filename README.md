@@ -1,6 +1,6 @@
 # eRA Commons Keep Alive
 
-This small Chrome extension helps keep **your own** NIH eRA Commons session active on **your own computer**. When it is on and an eRA Commons tab is open, it sends a harmless background request from that tab every 4 minutes. If eRA shows its session-timeout warning, the extension also tries to press that warning's safe “continue” button.
+This small, unofficial Chrome extension helps keep **your own** NIH eRA Commons session active on **your own computer**. eRA logs you out 45 minutes after your last click, key press, or scroll in an eRA page. Reading and mouse movement do not count. While an eRA tab is open, this extension sends the page a harmless scroll signal every 4 minutes so eRA's own timeout manager renews that timer. It does not move the viewport or click anything for this keep-alive signal. If eRA shows its session-timeout warning, the extension also tries to press that warning's safe “continue” button.
 
 It never reads, saves, fills, or sends passwords, two-factor codes, or any other credentials. It never attempts to log you in.
 
@@ -13,11 +13,11 @@ It never reads, saves, fills, or sends passwords, two-factor codes, or any other
 5. Select this folder (the one containing `manifest.json`).
 6. Open eRA Commons and sign in normally yourself.
 
-Click the extension's toolbar icon to turn it on or off and see its status. “Enabled — logged in” and a green **ON** badge mean the extension has seen an eRA page and is active. The popup records the most recent successful background request and automatic warning-button click. A red **!** badge and a Chrome notification mean eRA ended the session; sign in again normally.
+Click the extension's toolbar icon to turn it on or off and see its status. “Enabled — logged in” and a green **ON** badge mean the extension has seen an eRA page and is active. The popup records the most recent activity nudge, eRA's current logout time, and automatic warning-button click. A red **!** badge and a Chrome notification mean eRA ended the session; sign in again normally.
 
 ## Finding your real timeout
 
-After eRA sends you to a login page, open the extension popup and look at **Recent logouts**. Each entry says when the logout was detected, how long it had been since the extension's last successful check, and how long it had been since you last loaded an eRA page. Compare several entries to find the pattern. If a logout repeatedly follows a successful check by fewer than five minutes, the warning below it suggests that eRA may have a hard session limit or may not treat the background check as activity. The list keeps the 10 most recent detected logouts.
+After eRA sends you to a login page, open the extension popup and look at **Recent logouts**. Each entry says when the logout was detected, how long it had been since the extension's last activity nudge, and how long it had been since you last loaded an eRA page. Compare several entries to find the pattern. If a logout repeatedly follows an activity nudge by fewer than five minutes, the warning below it suggests that eRA may have a hard session limit or may not count the nudge as activity. The list keeps the 10 most recent detected logouts.
 
 ## Important limits
 

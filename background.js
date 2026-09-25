@@ -1,12 +1,13 @@
 "use strict";
 
 var ALARM_NAME = "era-keep-alive";
-var PING_PERIOD_MINUTES = 4;
+var NUDGE_PERIOD_MINUTES = 4;
 var ERA_TAB_QUERY = { url: ["https://*.era.nih.gov/*"] };
 var DEFAULT_STATE = {
   enabled: true,
   sessionStatus: "unknown",
-  lastSuccessfulPingAt: null,
+  lastNudgeAt: null,
+  eraLogoutAt: null,
   lastUserPageLoadAt: null,
   lastAutoClick: null,
   logoutRecords: []
@@ -43,25 +44,25 @@ async function configureAlarm() {
     await chrome.alarms.clear(ALARM_NAME);
     return;
   }
-  await chrome.alarms.create(ALARM_NAME, { periodInMinutes: PING_PERIOD_MINUTES });
+  await chrome.alarms.create(ALARM_NAME, { periodInMinutes: NUDGE_PERIOD_MINUTES });
 }
 
 async function markLoggedOut() {
   var prior = await getState();
   var detectedAt = Date.now();
-  var updates = { sessionStatus: "logged-out" };
+  var updates = { sessionStatus: "logged-out", eraLogoutAt: null };
   if (prior.sessionStatus !== "logged-out") {
-    var lastSuccessfulPingAt = prior.lastSuccessfulPingAt;
+    var lastNudgeAt = prior.lastNudgeAt;
     var lastUserPageLoadAt = prior.lastUserPageLoadAt;
-    var minutesSinceLastPing = lastSuccessfulPingAt === null ? null :
-      Math.max(0, Math.round((detectedAt - lastSuccessfulPingAt) / 60000));
+    var minutesSinceLastNudge = lastNudgeAt === null ? null :
+      Math.max(0, Math.round((detectedAt - lastNudgeAt) / 60000));
     var minutesSinceLastPageLoad = lastUserPageLoadAt === null ? null :
       Math.max(0, Math.round((detectedAt - lastUserPageLoadAt) / 60000));
     var record = {
       loggedOutDetectedAt: detectedAt,
-      lastSuccessfulPingAt: lastSuccessfulPingAt,
+      lastNudgeAt: lastNudgeAt,
       lastUserPageLoadAt: lastUserPageLoadAt,
-      minutesSinceLastPing: minutesSinceLastPing,
+      minutesSinceLastNudge: minutesSinceLastNudge,
       minutesSinceLastPageLoad: minutesSinceLastPageLoad
     };
     updates.logoutRecords = [record].concat(prior.logoutRecords || []).slice(0, 10);
@@ -79,7 +80,7 @@ async function markLoggedOut() {
   }
 }
 
-async function pingOneEraTab() {
+async function nudgeEraTabs() {
   var state = await getState();
   if (!state.enabled || state.sessionStatus === "logged-out") return;
   var tabs = await chrome.tabs.query(ERA_TAB_QUERY);
@@ -87,16 +88,35 @@ async function pingOneEraTab() {
     await chrome.alarms.clear(ALARM_NAME);
     return;
   }
-  try {
-    var result = await chrome.tabs.sendMessage(tabs[0].id, { type: "keep-alive-ping" });
-    if (result && result.loggedOut) {
-      await markLoggedOut();
-    } else if (result && result.success) {
-      await setState({ sessionStatus: "logged-in", lastSuccessfulPingAt: Date.now() });
-      await updateBadge();
+  var results = await Promise.all(tabs.map(async function (tab) {
+    try {
+      return await chrome.tabs.sendMessage(tab.id, { type: "nudge-activity" });
+    } catch (error) {
+      // A tab can close or still be loading; the next alarm retries it.
+      return null;
     }
-  } catch (error) {
-    // A tab can close between query and sendMessage; the next alarm retries.
+  }));
+
+  if (results.some(function (result) { return result && result.loggedOut; })) {
+    await markLoggedOut();
+    return;
+  }
+
+  var nudges = results.filter(function (result) { return result && result.nudged; });
+  if (nudges.length) {
+    var now = Date.now();
+    var logoutAt = null;
+    nudges.forEach(function (result) {
+      if (typeof result.logoutAt === "number" && (logoutAt === null || result.logoutAt > logoutAt)) {
+        logoutAt = result.logoutAt;
+      }
+    });
+    var updates = { lastNudgeAt: now, eraLogoutAt: logoutAt };
+    if (typeof logoutAt === "number" && logoutAt > now + 30 * 60 * 1000) {
+      updates.sessionStatus = "logged-in";
+    }
+    await setState(updates);
+    await updateBadge();
   }
 }
 
@@ -113,7 +133,7 @@ chrome.runtime.onStartup.addListener(async function () {
 });
 
 chrome.alarms.onAlarm.addListener(function (alarm) {
-  if (alarm.name === ALARM_NAME) pingOneEraTab();
+  if (alarm.name === ALARM_NAME) nudgeEraTabs();
 });
 
 chrome.runtime.onMessage.addListener(function (message) {

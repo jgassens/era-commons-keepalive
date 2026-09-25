@@ -33,7 +33,42 @@
     return Array.prototype.slice.call(node.querySelectorAll(selector));
   }
 
-  function findTimeoutContinueButton(documentLike) {
+  function isVisible(visibility) {
+    return !!visibility && Number(visibility.clientRectCount) > 0 &&
+      String(visibility.display || "").toLowerCase() !== "none" &&
+      String(visibility.visibility || "").toLowerCase() !== "hidden";
+  }
+
+  function nodeFrom(documentLike, selector) {
+    if (!documentLike || typeof documentLike.querySelector !== "function") return null;
+    return documentLike.querySelector(selector);
+  }
+
+  function isSafeContinueButton(button) {
+    if (!button) return false;
+    var id = String(button.id || button.getAttribute && button.getAttribute("id") || "");
+    return id !== "logoutBtn" && id !== "native-logoutBtn" && !forbiddenWords.test(textOf(button));
+  }
+
+  function findTimeoutContinueButton(documentLike, isNodeVisible) {
+    // The caller supplies the browser-specific visibility check. Keeping it an
+    // argument makes the selection logic testable with small fake DOM objects.
+    isNodeVisible = typeof isNodeVisible === "function" ? isNodeVisible : function () { return true; };
+
+    var knownModals = [
+      { region: "#sessionTimeoutModalDialog", button: "#extendSessionBtn" },
+      { region: "#sessionTimeoutModalDialogNative", button: "#native-extendSessionBtn" }
+    ];
+    for (var knownIndex = 0; knownIndex < knownModals.length; knownIndex += 1) {
+      var known = knownModals[knownIndex];
+      var knownRegion = nodeFrom(documentLike, known.region);
+      if (!knownRegion || !isNodeVisible(knownRegion)) continue;
+      var knownButton = nodeFrom(knownRegion, known.button) || nodeFrom(documentLike, known.button);
+      if (knownButton && isNodeVisible(knownButton) && isSafeContinueButton(knownButton)) {
+        return knownButton;
+      }
+    }
+
     // Restrict matches to semantic dialog-like regions. This deliberately avoids
     // scanning all buttons on a page, where a similarly worded action is unsafe.
     var regions = listFrom(documentLike, '[role="dialog"], [role="alertdialog"], dialog, [aria-modal="true"], [role="alert"]');
@@ -45,32 +80,43 @@
     });
     for (var i = 0; i < regions.length; i += 1) {
       var region = regions[i];
-      if (!isTimeoutWarningText(textOf(region))) continue;
+      if (!isNodeVisible(region) || !isTimeoutWarningText(textOf(region))) continue;
       var controls = listFrom(region, 'button, input[type="button"], input[type="submit"], [role="button"]');
       for (var j = 0; j < controls.length; j += 1) {
-        if (isContinueButtonText(textOf(controls[j]))) return controls[j];
+        if (isNodeVisible(controls[j]) && isSafeContinueButton(controls[j]) &&
+          isContinueButtonText(textOf(controls[j]))) return controls[j];
       }
     }
     return null;
   }
 
-  function pingUrlFor(locationLike) {
-    var source = locationLike || "";
-    var hostname = String(source.hostname || source.host || "").toLowerCase();
-    var origin = source.origin;
-
-    if (!hostname || !origin) {
+  function parseEraLogoutAt(cookieString) {
+    var cookies = String(cookieString || "").split(";");
+    for (var i = 0; i < cookies.length; i += 1) {
+      var parts = cookies[i].split("=");
+      var name = parts.shift().trim();
+      if (name !== "ERA_SESSION_TIMEOUT_COOKIE") continue;
+      var value = parts.join("=").trim();
       try {
-        var parsed = new URL(String(source.href || source));
-        hostname = parsed.hostname.toLowerCase();
-        origin = parsed.origin;
+        value = decodeURIComponent(value);
       } catch (error) {
-        return "";
+        return null;
       }
+      if (!/^\d+$/.test(value)) return null;
+      var logoutAt = Number(value);
+      return Number.isSafeInteger(logoutAt) ? logoutAt : null;
     }
+    return null;
+  }
 
-    if (hostname === "public.era.nih.gov") return "https://public.era.nih.gov/commons/";
-    return String(origin).replace(/\/+$/, "") + "/";
+  function isEraLogoutUrl(url) {
+    try {
+      var parsed = new URL(String(url || ""));
+      return parsed.pathname.indexOf("/authi/public/do") !== -1 &&
+        String(parsed.searchParams.get("action") || "").toLowerCase() === "logout";
+    } catch (error) {
+      return false;
+    }
   }
 
   function isLoginUrl(url) {
@@ -94,8 +140,10 @@
     textOf: textOf,
     isTimeoutWarningText: isTimeoutWarningText,
     isContinueButtonText: isContinueButtonText,
+    isVisible: isVisible,
     findTimeoutContinueButton: findTimeoutContinueButton,
-    pingUrlFor: pingUrlFor,
+    parseEraLogoutAt: parseEraLogoutAt,
+    isEraLogoutUrl: isEraLogoutUrl,
     isLoginUrl: isLoginUrl,
     isLoginPage: isLoginPage
   };
