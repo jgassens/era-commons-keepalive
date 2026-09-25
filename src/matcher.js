@@ -237,7 +237,9 @@
     if (!result || result.ignored) return { classification: "neutral", reason: "ignored page" };
     // Judged from the tab's URL, so this holds even for a tab we cannot reach.
     // eRA deletes its cookie before it logs out, so a live cookie outranks it.
-    if (result.isLoginPage) return { classification: "ended", reason: "login or logout page", weak: true, loginPage: true };
+    if (result.isLoginPage) {
+      return { classification: "ended", reason: "login or logout page", weak: true, loginPage: true, minsLeft: tabMinutesLeft(result) };
+    }
     if (result.unreachable) return { classification: "neutral", reason: "could not reach tab" };
     if (result.disabled) return { classification: "neutral", reason: "extension off in this tab" };
     var live = hasLiveCookie(result);
@@ -279,8 +281,12 @@
       var match = explained.find(test);
       if (!match) return null;
       var reason = match.reason;
-      // A login page with the cookie gone is eRA's own logout, and says so.
-      if (match.loginPage && (cookieState === "missing" || cookieState === "expired")) {
+      // The login page's own view of the cookie comes first: if eRA's page
+      // timer still had time there, eRA's server ended the session, not the
+      // timer. Otherwise a login page with the cookie gone is eRA's own logout.
+      if (match.loginPage && typeof match.minsLeft === "number" && match.minsLeft > 0) {
+        reason = serverEndedReason(match.minsLeft);
+      } else if (match.loginPage && (cookieState === "missing" || cookieState === "expired")) {
         reason += cookieState === "expired" ? " (eRA timer cookie expired)" : " (eRA timer cookie deleted)";
       }
       return { status: status, reason: reason, path: match.path };
@@ -307,6 +313,11 @@
     return { status: priorStatus, reason: null, path: null };
   }
 
+  function serverEndedReason(minutesLeft) {
+    return "eRA sent you to its login page while its page timer still had " + String(roundMinutes(minutesLeft)) +
+      " min left — eRA's server ended the session";
+  }
+
   function deriveSessionStatus(results, priorStatus, cookie) {
     return decideSession(results, priorStatus, cookie).status;
   }
@@ -315,6 +326,9 @@
   function logoutNote(record) {
     if (!record) return null;
     var reason = String(record.reason || "");
+    if (/server ended the session/i.test(reason)) {
+      return "eRA's server ended this session even though its page timer was still running. Keep \"Also ping eRA's server\" on.";
+    }
     if (/cookie deleted/i.test(reason)) {
       return "eRA deleted its own timeout cookie — eRA's page timer or the Logout button ended the session.";
     }
@@ -389,7 +403,9 @@
       return prefix + "nudge " + path + ": " + detail + ", " + describeServer(entry);
     }
     if (entry.type === "page-load") {
-      var pageDetail = entry.isLoginPage ? "login or logout page" :
+      // A login page that still shows a live timer is eRA's server ending the
+      // session, so the timer is shown there too.
+      var pageDetail = entry.isLoginPage ? "login or logout page" + (typeof entry.minsLeft === "number" ? ", " + describeCookie(entry.minsLeft) : "") :
         (entry.managerPresent ? "" : "no timeout manager, ") + describeCookie(entry.minsLeft);
       return prefix + "page load " + path + ": " + pageDetail;
     }
@@ -418,7 +434,22 @@
     return prefix + String(entry.type || "event") + " " + path;
   }
 
+  // True when dotted version a is older than b ("1.4.2" < "1.4.10"). A
+  // missing or unreadable a counts as older.
+  function isVersionBefore(a, b) {
+    var left = String(a || "").split(".");
+    var right = String(b || "").split(".");
+    if (!a || left.some(function (part) { return !/^\d+$/.test(part); })) return true;
+    for (var i = 0; i < Math.max(left.length, right.length); i += 1) {
+      var x = Number(left[i] || 0);
+      var y = Number(right[i] || 0);
+      if (x !== y) return x < y;
+    }
+    return false;
+  }
+
   return {
+    isVersionBefore: isVersionBefore,
     textOf: textOf,
     isTimeoutWarningText: isTimeoutWarningText,
     isContinueButtonText: isContinueButtonText,

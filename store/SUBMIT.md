@@ -13,11 +13,11 @@ for you in `store/listing.md`.
    ```sh
    bash scripts/package.sh
    ```
-   This creates `dist/session-keeper-era-1.4.2.zip`. That file is what you
+   This creates `dist/session-keeper-era-1.4.3.zip`. That file is what you
    upload — nothing else.
 
 3. **Start a new item.** In the developer dashboard, click **New item**,
-   then upload `dist/session-keeper-era-1.4.2.zip` when prompted.
+   then upload `dist/session-keeper-era-1.4.3.zip` when prompted.
 
 4. **Take the screenshots and promo tile** if you have not already (see
    `store/screenshots/` and `store/promo-small-440x280.png` — they are
@@ -45,6 +45,11 @@ for you in `store/listing.md`.
    - Under **Data usage**, tick the boxes and the three certifications
      exactly as `store/listing.md` recommends, and paste in the note about
      what the local diagnostic log is and is not.
+   - Since 1.4.3 the "Also ping eRA's server" switch is **on by default**
+     (it can be switched off in the popup). Its only network call goes to
+     eRA's own keep-alive address on eRA's own site. The listing text and
+     the privacy policy already say so; make sure any wording you type in
+     the dashboard yourself says the same.
 
 7. **Set Visibility to Unlisted.** This is under the **Distribution** tab
    (a separate tab from the main store listing), not a checkbox on the

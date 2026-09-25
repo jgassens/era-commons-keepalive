@@ -5,7 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Session Keeper for eRA Commons (unofficial)</title>
     <style>
-      body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; min-width: 260px; color: #1f2937; }
+      /* A fixed width: left to itself Chrome shrinks the popup to its narrowest
+         fit, and long logout records then push the log far out of view. */
+      body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; width: 360px; color: #1f2937; }
       h1 { font-size: 16px; margin: 0 0 14px; }
       label { display: flex; align-items: center; gap: 8px; font-weight: 600; }
       label + label { margin-top: 8px; font-weight: 400; }
@@ -14,10 +16,10 @@
       dt { font-weight: 600; margin-top: 8px; }
       dd { margin: 1px 0 0; color: #4b5563; }
       h2 { font-size: 14px; margin: 20px 0 6px; }
-      #logout-records { margin: 0; padding-left: 20px; color: #4b5563; }
+      #logout-records { margin: 0; padding-left: 20px; color: #4b5563; max-height: 190px; overflow: auto; }
       #logout-records li { margin: 5px 0; }
       #logout-records .logout-warning { color: #991b1b; }
-      details { margin-top: 18px; }
+      details { margin-top: 16px; }
       summary { cursor: pointer; font-weight: 600; }
       #diagnostic-log { margin-top: 8px; max-height: 240px; overflow: auto; color: #4b5563; font: 11px/1.45 ui-monospace, monospace; }
       #diagnostic-log div { margin: 4px 0; }
@@ -38,13 +40,13 @@
       <dt>Last continued warning</dt><dd id="last-click">Never</dd>
     </dl>
     <p id="server-warning" hidden></p>
-    <h2>Recent logouts</h2>
-    <ul id="logout-records"></ul>
     <details>
       <summary>Diagnostic log</summary>
       <div id="diagnostic-log"></div>
       <button id="copy-log" type="button">Copy log</button>
     </details>
+    <h2>Recent logouts</h2>
+    <ul id="logout-records"></ul>
     <div id="version"></div>
     <script src="src/matcher.js"></script>
     <script src="popup.js"></script>

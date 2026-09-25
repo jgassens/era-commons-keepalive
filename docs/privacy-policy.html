@@ -65,7 +65,9 @@
       While it is turned on and an eRA Commons browser tab is open, it sends
       that page a harmless scroll signal every four minutes so eRA's own page
       script treats you as active, and it presses eRA's own on-screen
-      "Continue" button if a timeout warning appears. That is the whole job.
+      "Continue" button if a timeout warning appears. By default it also
+      calls eRA's own keep-alive address on eRA's own site (see "The one
+      network call" below). That is the whole job.
     </p>
 
     <h2>What data it handles</h2>
@@ -101,16 +103,19 @@
         script it runs ships inside the extension package itself.</li>
     </ul>
 
-    <h2>The one optional network call</h2>
+    <h2>The one network call</h2>
     <p>
-      The popup has a switch, off by default, labeled "Also ping eRA's
-      server." If you turn it on yourself, the extension will additionally
-      call eRA's own keep-alive web address directly — the same address
-      eRA's own page already calls on its own every 40 minutes — so it can
-      tell you whether eRA's server or eRA's page timer ended a session.
-      This call goes only to an <code>https://*.era.nih.gov</code> address
-      that eRA itself already serves; it never goes anywhere else, and the
-      extension works fine with this switch left off.
+      The popup has a switch labeled "Also ping eRA's server." It is on by
+      default, and you can switch it off at any time. While it is on, the
+      extension calls eRA's own keep-alive web address directly — the same
+      address eRA's own page already calls on its own every 40 minutes —
+      because eRA's server can end a session it has not heard from in about
+      an hour even while eRA's page timer is still running. This call goes
+      only to an <code>https://*.era.nih.gov</code> address that eRA itself
+      already serves; it never goes anywhere else, and it carries nothing
+      from the extension beyond what your browser already sends to eRA.
+      With the switch off, no such call is made and the extension still
+      nudges eRA's page.
     </p>
 
     <h2>How to delete your data</h2>

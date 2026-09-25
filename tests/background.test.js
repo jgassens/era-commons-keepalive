@@ -277,7 +277,7 @@ test("an unreachable tab is logged as such and does not block logout detection",
 
 test("a deleted cookie after logged-in means logged-out", async function () {
   var fake = makeFake({
-    storage: { sessionStatus: "logged-in", sessionStartedAt: Date.now() - 90 * MINUTE },
+    storage: { sessionStatus: "logged-in", sessionStartedAt: Date.now() - 90 * MINUTE, pingServer: false },
     tabs: [eraTab(1, HOME, { managerPresent: true, logoutAt: null })]
   });
   await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
@@ -362,7 +362,7 @@ test("the server is pinged only when the switch is on, once per keep-alive URL",
     ];
   }
 
-  var off = makeFake({ storage: { sessionStatus: "logged-in" }, tabs: tabsWithTwoApps() });
+  var off = makeFake({ storage: { sessionStatus: "logged-in", pingServer: false }, tabs: tabsWithTwoApps() });
   await off.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
   assert.deepEqual(off.tabs.map(function (tab) { return tab.pings; }), [0, 0, 0]);
   assert.deepEqual(off.tabs.map(function (tab) { return tab.nudges; }), [1, 1, 1]);
@@ -370,7 +370,8 @@ test("the server is pinged only when the switch is on, once per keep-alive URL",
     .every(function (entry) { return entry.pingServer === false; }));
   assert.ok(logLines(off).some(function (line) { return line.endsWith("server not called (ping off)"); }));
 
-  var on = makeFake({ storage: { sessionStatus: "logged-in", pingServer: true }, tabs: tabsWithTwoApps() });
+  // With nothing stored the switch is on: that is the default since 1.4.3.
+  var on = makeFake({ storage: { sessionStatus: "logged-in" }, tabs: tabsWithTwoApps() });
   await on.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
   assert.deepEqual(on.tabs.map(function (tab) { return tab.pings; }), [1, 0, 1]);
   assert.deepEqual(on.tabs.map(function (tab) { return tab.nudges; }), [1, 1, 1]);
@@ -475,15 +476,42 @@ test("ignored pages do not create the alarm or appear in the log", async functio
   assert.equal((fake.store.diagnosticLog || []).length, 0);
 });
 
-test("install injects the content script into open eRA tabs and defaults the ping off", async function () {
+test("install injects the content script into open eRA tabs and defaults the ping on", async function () {
   var fake = makeFake({ tabs: [eraTab(1, HOME, liveManager()), eraTab(2, LOGIN, { unreachable: true })] });
-  fake.chrome.runtime.onInstalled.listeners.forEach(function (fn) { fn({ reason: "update" }); });
+  fake.chrome.runtime.onInstalled.listeners.forEach(function (fn) { fn({ reason: "install" }); });
   await settle();
   assert.deepEqual(fake.calls.executeScript.map(function (call) { return call.target.tabId; }), [1, 2]);
   assert.deepEqual(Array.from(fake.calls.executeScript[0].files), ["src/matcher.js", "content.js"]);
-  assert.equal(fake.store.pingServer, false);
+  assert.equal(fake.store.pingServer, true);
+  assert.equal(fake.store.pingDefaultOnApplied, true);
   assert.equal(fake.store.enabled, true);
   assert.ok(fake.alarms["era-keep-alive"]);
+});
+
+async function installEvent(storage, details) {
+  var fake = makeFake({ storage: storage, tabs: [] });
+  fake.chrome.runtime.onInstalled.listeners.forEach(function (fn) { fn(details); });
+  await settle();
+  return fake.store;
+}
+
+test("an update from before 1.4.3 turns the server ping on once, then respects the user's choice", async function () {
+  var updated = await installEvent({ pingServer: false, enabled: true }, { reason: "update", previousVersion: "1.4.2" });
+  assert.equal(updated.pingServer, true);
+  assert.equal(updated.pingDefaultOnApplied, true);
+  assert.equal((await installEvent({ pingServer: false }, { reason: "update", previousVersion: "1.2.0" })).pingServer, true);
+
+  // The user turned it off after the migration: later updates, reloads and
+  // Chrome updates leave it off.
+  var turnedOff = { pingServer: false, enabled: true, pingDefaultOnApplied: true };
+  assert.equal((await installEvent(turnedOff, { reason: "update", previousVersion: "1.4.2" })).pingServer, false);
+  assert.equal((await installEvent(turnedOff, { reason: "update", previousVersion: "1.4.3" })).pingServer, false);
+  assert.equal((await installEvent(turnedOff, { reason: "chrome_update" })).pingServer, false);
+
+  // An update from 1.4.3 or later never overrides a stored choice.
+  var later = await installEvent({ pingServer: false, enabled: true }, { reason: "update", previousVersion: "1.4.3" });
+  assert.equal(later.pingServer, false);
+  assert.equal(later.pingDefaultOnApplied, true);
 });
 
 test("a late alarm is logged", async function () {
@@ -615,6 +643,21 @@ test("an unreachable tab sitting on eRA's logout URL counts as a logout once the
   await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
   assert.equal(fake.store.sessionStatus, "logged-out");
   assert.equal(fake.store.logoutRecords[0].reason, "login or logout page (eRA timer cookie deleted)");
+});
+
+test("a login page that still saw eRA's timer running is recorded as eRA's server ending the session", async function () {
+  // From a real log: nudges kept eRA's page timer at 45 min, then eRA sent the
+  // tab to its login page while the page still showed 45 min left.
+  var fake = makeFake({ storage: { sessionStatus: "logged-in", pingServer: false }, tabs: [eraTab(1, "https://public.era.nih.gov/assist/public/login.era")] });
+  await fake.bg.handleMessage(pageReady({ path: "/assist/public/login.era", isLoginPage: true, managerPresent: false, minsLeft: 45 }), { tab: { id: 1 } });
+  await fake.drain();
+  assert.equal(fake.store.sessionStatus, "logged-out");
+  var record = fake.store.logoutRecords[0];
+  assert.equal(record.reason, "eRA sent you to its login page while its page timer still had 45 min left — eRA's server ended the session");
+  assert.doesNotMatch(record.reason, /cookie deleted/);
+  assert.equal(matcher.logoutNote(record),
+    "eRA's server ended this session even though its page timer was still running. Keep \"Also ping eRA's server\" on.");
+  assert.ok(logLines(fake).some(function (line) { return /status logged-in -> logged-out: eRA sent you to its login page while its page timer still had 45 min left/.test(line); }));
 });
 
 test("a login tab with a live cookie stays logged-in and keeps nudging", async function () {

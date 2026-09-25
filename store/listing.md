@@ -35,11 +35,12 @@ What it does, while enabled and an eRA Commons tab is open:
   anything you didn't ask it to.
 - If eRA's own timeout warning pops up anyway, it presses that warning's
   own "Continue" button for you.
-- Optionally (off by default — you turn it on yourself in the popup), it
-  also calls eRA's own keep-alive web address directly, the same address
-  eRA's page already calls on its own every 40 minutes. This only tells you
-  whether eRA's server or eRA's page timer ended a session; you can leave
-  it off and the extension still works.
+- By default it also calls eRA's own keep-alive web address directly —
+  the same address eRA's page already calls on its own every 40 minutes —
+  because eRA's server can end a session it has not heard from in about an
+  hour even while eRA's page timer is still running. You can switch this
+  off in the popup ("Also ping eRA's server"); the page nudges carry on
+  either way.
 - It keeps a small log on your own computer — times, page names, and
   whether eRA's timer was extended — so you can see what it has been
   doing. That log never leaves your computer unless you press "Copy log"
@@ -51,9 +52,9 @@ What it never does:
 - It never reads, stores, fills in, or sends your username, password, two-
   factor code, or any other credential.
 - It sends nothing to anyone, anywhere, except eRA's own keep-alive web
-  address on eRA's own site — and only when you have switched that optional
-  setting on yourself. There is no server run by the developer, and no
-  analytics of any kind.
+  address on eRA's own site — and only while "Also ping eRA's server" is on
+  (it is on by default; switch it off in the popup to stop it). There is no
+  server run by the developer, and no analytics of any kind.
 
 This extension is meant for your own eRA Commons account, on your own
 computer, and does nothing while it is turned off in the popup.
@@ -101,7 +102,7 @@ Each permission below is tied to the exact code that uses it, so the
 reasoning can be checked against the source at any time.
 
 **storage** — Used to remember whether the extension is turned on, whether
-the optional server ping is turned on, the current sign-in/sign-out status,
+the server ping is turned on (on by default), the current sign-in/sign-out status,
 the times of the last nudge and last warning click, the list of recent
 logouts, and the local diagnostic log — all read and written with
 `chrome.storage.local` in `background.js` and read back by the popup
@@ -136,8 +137,8 @@ put there, and never any other site's cookies.
 extension is allowed to act on at all: it scopes the content script
 (`manifest.json` `content_scripts`), which tab this extension will inject
 into or send an activity signal to (`chrome.tabs.query`, `content.js`), the
-cookie reads above, and the optional keep-alive web address the extension
-may call, which `src/matcher.js` builds and refuses to use unless the
+cookie reads above, and eRA's own keep-alive web address the extension
+calls while its server-ping switch is on (the default), which `src/matcher.js` builds and refuses to use unless the
 result is still an `https://*.era.nih.gov` address. The extension cannot
 act on any other website.
 
@@ -182,7 +183,8 @@ data is read, stored, or handled anywhere in the extension.
 **Certifications — check all three:**
 - ☑ I do not sell or transfer user data to third parties outside of the
   approved use cases. *(True — nothing is sold or transferred; the only
-  outbound call is the optional, user-controlled ping to eRA's own site.)*
+  outbound call is the ping to eRA's own keep-alive address on eRA's own site,
+  on by default and switched off by the user in the popup.)*
 - ☑ I do not use or transfer user data for purposes unrelated to the item's
   single purpose. *(True — the local log exists only to show the extension
   is working; it is not used for anything else.)*

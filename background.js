@@ -12,9 +12,11 @@ var LOGOUT_AT_STEP_MS = 60 * 1000;
 var ERA_TAB_QUERY = { url: ["https://*.era.nih.gov/*"] };
 var CONTENT_FILES = ["src/matcher.js", "content.js"];
 var IDLE_END_REASON = "ended while no eRA tab was open";
+// 1.4.3 turned the server ping on by default; see startUp().
+var PING_DEFAULT_ON_VERSION = "1.4.3";
 var DEFAULT_STATE = {
   enabled: true,
-  pingServer: false,
+  pingServer: true,
   sessionStatus: "unknown",
   sessionStartedAt: null,
   lastNudgeAt: null,
@@ -611,13 +613,30 @@ async function resolveAfterRestart() {
   await resolveIdle(state, at, { cookie: cookie, tabsOpen: (await queryEraTabs()).length > 0 });
 }
 
-async function startUp(defaultsToFill) {
+// eRA's server ends sessions it has not heard from in about an hour even
+// while its page timer is kept alive, so the server ping is on by default.
+// An update from before 1.4.3 turns it on once; pingDefaultOnApplied makes
+// sure a later choice to turn it off is never overridden.
+function installDefaults(stored, details) {
+  details = details || {};
+  var fill = {};
+  if (typeof stored.enabled !== "boolean") fill.enabled = true;
+  if (typeof stored.pingServer !== "boolean") fill.pingServer = true;
+  if (!stored.pingDefaultOnApplied) {
+    if (details.reason === "install" ||
+      (details.reason === "update" && matcher.isVersionBefore(details.previousVersion, PING_DEFAULT_ON_VERSION))) {
+      fill.pingServer = true;
+    }
+    fill.pingDefaultOnApplied = true;
+  }
+  return fill;
+}
+
+async function startUp(defaultsToFill, details) {
   if (!defaultsToFill) await serialized(resolveAfterRestart);
   if (defaultsToFill) {
-    var stored = await chrome.storage.local.get(["enabled", "pingServer"]);
-    var fill = {};
-    if (typeof stored.enabled !== "boolean") fill.enabled = true;
-    if (typeof stored.pingServer !== "boolean") fill.pingServer = false;
+    var stored = await chrome.storage.local.get(["enabled", "pingServer", "pingDefaultOnApplied"]);
+    var fill = installDefaults(stored, details);
     if (Object.keys(fill).length) await setState(fill);
   }
   await injectIntoOpenTabs();
@@ -625,8 +644,8 @@ async function startUp(defaultsToFill) {
   await updateBadge();
 }
 
-chrome.runtime.onInstalled.addListener(function () {
-  startUp(true).catch(function (error) { console.warn("eRA Keep Alive: install setup failed", error); });
+chrome.runtime.onInstalled.addListener(function (details) {
+  startUp(true, details).catch(function (error) { console.warn("eRA Keep Alive: install setup failed", error); });
 });
 
 chrome.runtime.onStartup.addListener(function () {

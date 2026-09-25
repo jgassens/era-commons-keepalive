@@ -30,24 +30,25 @@ When the extension is installed, updated, or Chrome starts, it adds itself to eR
 Click the extension's toolbar icon to see its status.
 
 - **Keep session active** turns the whole extension on or off. While it is off, nothing is scrolled, clicked, or pinged, and nothing is logged.
-- **Also ping eRA's server** is **off by default**. See below.
+- **Also ping eRA's server** is **on by default** and can be switched off. See below.
 - A green **ON** badge means the extension found a live eRA timer. An orange **ON!** badge means eRA's server turned down the last check-in even though eRA's timer is still running (see below). A red **!** badge and a Chrome notification mean a session the extension had seen as signed in has ended; sign in again normally. The red badge clears as soon as you load an eRA page after signing back in.
 - A grey **…** badge (status *No eRA tab open — not keeping the session alive*) means you closed every eRA tab while eRA's timer was still running. With no tab there is nothing to nudge, so the session is left to eRA's own timer. When you next open an eRA page (or Chrome restarts), the extension checks the cookie: if it is still live, you are simply logged in again with the same sign-in time; if it has run out or is gone, the logout is recorded quietly — no notification, since it happened while you were away — with the time it **probably ended** (eRA's last known logout time).
 
 ### "Also ping eRA's server"
 
-eRA's own page already calls a check-in address (`keepSessionAlive.jsp`) on eRA's server every 40 minutes while its timer is live. So the extension does **not** call it unless you turn this switch on.
+eRA's own page calls a check-in address (`keepSessionAlive.jsp`) on eRA's server every 40 minutes while its timer is live. Keeping eRA's **page timer** alive turned out not to be enough: logs showed eRA's **server** ending sessions it had not heard from in about 60–77 minutes, even while the page timer still had 45 minutes left. With this switch on, a 58-minute stretch without clicking survived.
 
-The switch exists to answer one question: when a session ends, was it eRA's **page timer** or eRA's **server** that ended it? With the switch on, every 4 minutes the extension calls that check-in address once per eRA application (not once per tab) and records the answer. It gives up on a call after 15 seconds and logs **server timeout**.
+So since version 1.4.3 the switch is **on by default**. Updating from an older version turns it on once; if you then switch it off, it stays off. With the switch on, every 4 minutes the extension calls that check-in address once per eRA application (not once per tab) and records the answer. The call goes only to eRA's own keep-alive address on eRA's own site. It gives up on a call after 15 seconds and logs **server timeout**. With the switch off, the extension still nudges eRA's page but does not call the server.
 
 If the server answers with a redirect, the extension does not follow it to the login page. It logs **server rejected keep-alive (redirect)**, turns the badge orange, shows a warning line in the popup, and keeps nudging. A redirect by itself does **not** count as a logout while eRA's timer cookie is still live; the session counts as ended only when the cookie is gone too.
 
 ## Recent logouts
 
-Each entry shows when the logout was noticed and why (for a session that ended while no eRA tab was open, also when it probably ended), how long you had been signed in, how long since the last activity nudge, how long since you last loaded an eRA page, how many minutes eRA's own timer had left at the last nudge, and the last server answer (or that the server was not called).
+Each entry shows when the logout was noticed and why (for a session that ended while no eRA tab was open, also when it probably ended), how long you had been signed in, how long since the last activity nudge, how long since you last loaded an eRA page, how many minutes eRA's own timer had left at the last nudge, and the last server answer (or that the server was not called). Logouts recorded by older versions show only the facts those versions kept. If one stored entry cannot be read, only that line says so; the rest of the popup still shows.
 
 Under some entries the popup adds one line saying what ended the session:
 
+- *"eRA's server ended this session even though its page timer was still running. Keep "Also ping eRA's server" on."* eRA sent the tab to its login page while the page's own timer still had time left (the reason reads *eRA sent you to its login page while its page timer still had N min left — eRA's server ended the session*).
 - *"eRA deleted its own timeout cookie — eRA's page timer or the Logout button ended the session."* eRA's page deletes the cookie only when its own timer runs out or you press **Logout**.
 - *"eRA's own timer ran out before the next activity nudge."* The cookie's deadline had passed.
 - *"No eRA tab was open, so nothing kept the session alive; …"* The session ended while you had no eRA tab open (or Chrome was closed, which drops eRA's cookie).
@@ -73,8 +74,8 @@ The collapsible **Diagnostic log** keeps up to 200 entries on your computer, sho
 | `server rejected keep-alive (redirect) …; eRA timer still live, still nudging` | The server turned the check-in down, but eRA's timer cookie is live, so the session is still counted as signed in. |
 | `server timeout` | The server did not answer within 15 seconds. |
 | `server error` | The call failed to get any answer (for example, no network). |
-| `page load /path: …` | You opened an eRA page; shows its timer. |
-| `status logged-in -> logged-out: reason` | The extension's view of your session changed, and why. `eRA timer cookie deleted` means eRA's page deleted its cookie (its timer ran out, or you pressed Logout). A login or logout page counts only when eRA's cookie is gone too; while the cookie is live, the session is still counted as signed in. |
+| `page load /path: …` | You opened an eRA page; shows its timer. For a login page it shows the timer that page still saw, if any. |
+| `status logged-in -> logged-out: reason` | The extension's view of your session changed, and why. `eRA timer cookie deleted` means eRA's page deleted its cookie (its timer ran out, or you pressed Logout). A login or logout page counts only when eRA's cookie is gone too; while the cookie is live, the session is still counted as signed in. If the login page itself still saw eRA's timer running, the reason is `eRA sent you to its login page while its page timer still had N min left — eRA's server ended the session`. |
 | `no eRA tabs open, cookie 30.0 min; not keeping the session alive …` | All eRA tabs are closed, but eRA's timer cookie is still live. Status goes to idle and the 4-minute timer stops because there is no tab to nudge; it starts again when you open an eRA page. |
 | `no eRA tabs open, cookie deleted` | All eRA tabs are closed and the cookie is gone. A session that was signed in is recorded as a logout; otherwise status goes back to unknown. |
 | `alarm late by N min (computer asleep?)` | Chrome's 4-minute timer fired late, usually because the computer slept. |
