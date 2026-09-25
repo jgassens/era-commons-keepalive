@@ -1,0 +1,126 @@
+"use strict";
+
+var ALARM_NAME = "era-keep-alive";
+var ERA_TAB_QUERY = { url: ["https://*.era.nih.gov/*"] };
+var DEFAULT_STATE = { enabled: true, sessionStatus: "unknown", lastSuccessfulPing: null, lastAutoClick: null };
+
+function getState() {
+  return chrome.storage.local.get(DEFAULT_STATE);
+}
+
+function setState(values) {
+  return chrome.storage.local.set(values);
+}
+
+async function updateBadge() {
+  var state = await getState();
+  if (!state.enabled) {
+    await chrome.action.setBadgeBackgroundColor({ color: "#6b7280" });
+    await chrome.action.setBadgeText({ text: "OFF" });
+  } else if (state.sessionStatus === "logged-out") {
+    await chrome.action.setBadgeBackgroundColor({ color: "#b91c1c" });
+    await chrome.action.setBadgeText({ text: "!" });
+  } else if (state.sessionStatus === "logged-in") {
+    await chrome.action.setBadgeBackgroundColor({ color: "#15803d" });
+    await chrome.action.setBadgeText({ text: "ON" });
+  } else {
+    await chrome.action.setBadgeBackgroundColor({ color: "#6b7280" });
+    await chrome.action.setBadgeText({ text: "?" });
+  }
+}
+
+async function configureAlarm() {
+  var state = await getState();
+  if (!state.enabled || state.sessionStatus === "logged-out") {
+    await chrome.alarms.clear(ALARM_NAME);
+    return;
+  }
+  await chrome.alarms.create(ALARM_NAME, { periodInMinutes: 10 });
+}
+
+async function markLoggedOut() {
+  var prior = await getState();
+  await setState({ sessionStatus: "logged-out" });
+  await chrome.alarms.clear(ALARM_NAME);
+  await updateBadge();
+  if (prior.sessionStatus !== "logged-out") {
+    await chrome.notifications.create("era-session-ended", {
+      type: "basic",
+      iconUrl: "icons/icon128.png",
+      title: "eRA Commons session ended - log in again",
+      message: "Please log in again to continue working."
+    });
+  }
+}
+
+async function pingOneEraTab() {
+  var state = await getState();
+  if (!state.enabled || state.sessionStatus === "logged-out") return;
+  var tabs = await chrome.tabs.query(ERA_TAB_QUERY);
+  if (!tabs.length) {
+    await chrome.alarms.clear(ALARM_NAME);
+    return;
+  }
+  try {
+    var result = await chrome.tabs.sendMessage(tabs[0].id, { type: "keep-alive-ping" });
+    if (result && result.loggedOut) {
+      await markLoggedOut();
+    } else if (result && result.success) {
+      await setState({ sessionStatus: "logged-in", lastSuccessfulPing: Date.now() });
+      await updateBadge();
+    }
+  } catch (error) {
+    // A tab can close between query and sendMessage; the next alarm retries.
+  }
+}
+
+chrome.runtime.onInstalled.addListener(async function () {
+  var stored = await chrome.storage.local.get("enabled");
+  if (typeof stored.enabled !== "boolean") await setState({ enabled: true });
+  await configureAlarm();
+  await updateBadge();
+});
+
+chrome.runtime.onStartup.addListener(async function () {
+  await configureAlarm();
+  await updateBadge();
+});
+
+chrome.alarms.onAlarm.addListener(function (alarm) {
+  if (alarm.name === ALARM_NAME) pingOneEraTab();
+});
+
+chrome.runtime.onMessage.addListener(function (message) {
+  if (!message) return;
+  if (message.type === "auto-click") {
+    console.info("eRA Commons timeout warning continued", new Date(message.at || Date.now()).toISOString());
+    setState({ lastAutoClick: message.at || Date.now() });
+  }
+  if (message.type === "era-page-ready") {
+    if (message.isLoginPage) {
+      markLoggedOut();
+    } else {
+      getState().then(async function (state) {
+        if (!state.enabled) return;
+        await setState({ sessionStatus: "logged-in" });
+        await configureAlarm();
+        await updateBadge();
+      });
+    }
+  }
+});
+
+chrome.storage.onChanged.addListener(function (changes, area) {
+  if (area !== "local" || !changes.enabled) return;
+  (async function () {
+    if (!changes.enabled.newValue) {
+      await chrome.alarms.clear(ALARM_NAME);
+    } else {
+      await setState({ sessionStatus: "unknown" });
+      await configureAlarm();
+    }
+    await updateBadge();
+  })();
+});
+
+updateBadge();

@@ -1,0 +1,72 @@
+/* Pure matching helpers shared by the content script and Node tests. */
+(function (root, factory) {
+  var api = factory();
+  root.EraKeepAlive = api;
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = api;
+  }
+})(typeof globalThis !== "undefined" ? globalThis : this, function () {
+  "use strict";
+
+  var timeoutWords = /\bsession\b[\s\S]{0,160}\b(timeout|timed\s*out|expire(?:d|s|ing)?|logged\s*out|inactiv(?:e|ity))\b|\b(timeout|timed\s*out|expire(?:d|s|ing)?|logged\s*out|inactiv(?:e|ity))\b[\s\S]{0,160}\bsession\b/i;
+  var continueWords = /^(?:continue|stay\s+logged\s+in|stay\s+signed\s+in|extend(?:\s+(?:session|login))?|keep\s+me\s+signed\s+in|keep\s+working|yes)$/i;
+  var forbiddenWords = /\b(?:logout|log\s*out|sign\s*out|end\s+session|cancel)\b/i;
+
+  function textOf(node) {
+    if (!node) return "";
+    return String(node.innerText || node.textContent || node.value || node.getAttribute && node.getAttribute("aria-label") || "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function isTimeoutWarningText(text) {
+    return timeoutWords.test(String(text || ""));
+  }
+
+  function isContinueButtonText(text) {
+    var normalized = String(text || "").replace(/\s+/g, " ").trim();
+    return !!normalized && !forbiddenWords.test(normalized) && continueWords.test(normalized);
+  }
+
+  function listFrom(node, selector) {
+    if (!node || typeof node.querySelectorAll !== "function") return [];
+    return Array.prototype.slice.call(node.querySelectorAll(selector));
+  }
+
+  function findTimeoutContinueButton(documentLike) {
+    // Restrict matches to semantic dialog-like regions. This deliberately avoids
+    // scanning all buttons on a page, where a similarly worded action is unsafe.
+    var regions = listFrom(documentLike, '[role="dialog"], [role="alertdialog"], dialog, [aria-modal="true"], [role="alert"]');
+    // Some older eRA pages may use a named modal container instead of ARIA.
+    // It is still subject to the same full timeout-text and exact-control checks.
+    var namedRegions = listFrom(documentLike, '[class*="dialog" i], [class*="modal" i], [class*="timeout" i], [id*="dialog" i], [id*="modal" i]');
+    namedRegions.forEach(function (region) {
+      if (regions.indexOf(region) === -1) regions.push(region);
+    });
+    for (var i = 0; i < regions.length; i += 1) {
+      var region = regions[i];
+      if (!isTimeoutWarningText(textOf(region))) continue;
+      var controls = listFrom(region, 'button, input[type="button"], input[type="submit"], [role="button"]');
+      for (var j = 0; j < controls.length; j += 1) {
+        if (isContinueButtonText(textOf(controls[j]))) return controls[j];
+      }
+    }
+    return null;
+  }
+
+  function isLoginPage(url, pageText) {
+    var address = String(url || "").toLowerCase();
+    var text = String(pageText || "").replace(/\s+/g, " ").toLowerCase();
+    var loginUrl = /(^|\.)login\.gov(?:[/:]|$)|\/(?:login|signin|sign-in|logout|logged-out)(?:[/?#.]|$)/.test(address);
+    var loginText = /\b(?:you\s+(?:have\s+been\s+)?logged\s+out|session\s+(?:has\s+)?ended|sign\s+in\s+(?:to|with)|log\s+in\s+(?:to|with)|login\.gov)\b/.test(text);
+    return loginUrl || loginText;
+  }
+
+  return {
+    textOf: textOf,
+    isTimeoutWarningText: isTimeoutWarningText,
+    isContinueButtonText: isContinueButtonText,
+    findTimeoutContinueButton: findTimeoutContinueButton,
+    isLoginPage: isLoginPage
+  };
+});
