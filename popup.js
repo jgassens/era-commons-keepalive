@@ -13,11 +13,15 @@ var defaults = {
   lastServerAcceptedAt: null,
   firstRefusalAt: null,
   logoutRecords: [],
-  diagnosticLog: []
+  diagnosticLog: [],
+  recorderOn: false,
+  recording: null
 };
 var enabled = document.getElementById("enabled");
 var pingServer = document.getElementById("ping-server");
+var recorderOn = document.getElementById("recorder-on");
 var matcher = globalThis.EraKeepAlive;
+var recorderLib = globalThis.EraRecorder;
 var currentLog = [];
 
 // Each part of the popup is drawn on its own, so one bad stored value can
@@ -181,6 +185,18 @@ function renderSessionPattern(state, records) {
   pattern.textContent = show ? sentence : "";
 }
 
+function renderRecorder(state) {
+  var count = recorderLib.recordingCount(state.recording);
+  if (recorderOn) recorderOn.checked = state.recorderOn === true;
+  var countEl = document.getElementById("recorder-count");
+  if (countEl) {
+    countEl.textContent = count ? count.toLocaleString("en-US") + (count === 1 ? " event" : " events") + " recorded" +
+      (state.recorderOn === true ? "" : " (recorder off)") : "No events recorded.";
+  }
+  var download = document.getElementById("download-recording");
+  if (download) download.disabled = !count;
+}
+
 function render(state) {
   state = state && typeof state === "object" ? state : defaults;
   section("version", function () {
@@ -195,6 +211,96 @@ function render(state) {
   section("session-pattern", function () { renderSessionPattern(state, listFrom(state.logoutRecords)); });
   section("logout-records", function () { renderLogoutRecords(listFrom(state.logoutRecords)); });
   section("diagnostic-log", function () { renderDiagnosticLog(listFrom(state.diagnosticLog)); });
+  section("recorder", function () { renderRecorder(state); });
+}
+
+// The recorder writes every 2 seconds; that redraws only its own count, so
+// an open "More" under a logout card is not collapsed each time.
+function loadRecorder() {
+  return chrome.storage.local.get({ recorderOn: false, recording: null }).then(function (state) {
+    section("recorder", function () { renderRecorder(state); });
+  }, function (error) {
+    console.warn("eRA Keep Alive: could not read the recording", error);
+  });
+}
+
+function isRecorderKey(key) {
+  return key === "recording" || key.indexOf("recording-") === 0 || key === "recorderSalt" || key === "recorderPending";
+}
+
+function flash(button, text, restore) {
+  button.textContent = text;
+  window.setTimeout(function () { button.textContent = restore; }, 1500);
+}
+
+// chrome.permissions.request must be called straight from the click, before
+// any await, or Chrome refuses it. The switch stays off unless it is granted.
+function turnRecorderOn() {
+  recorderOn.checked = false;
+  var asked;
+  try {
+    // Lets the background finish turning it on if the popup closes while
+    // Chrome's permission prompt is open.
+    chrome.storage.local.set({ recorderPending: Date.now() }).catch(function () {});
+    asked = chrome.permissions.request(recorderLib.PERMISSIONS);
+  } catch (error) {
+    asked = Promise.reject(error);
+  }
+  return Promise.resolve(asked).then(function (granted) {
+    return !!granted;
+  }, function (error) {
+    console.warn("eRA Keep Alive: could not ask for the recorder's permissions", error);
+    return false;
+  }).then(function (granted) {
+    recorderOn.checked = granted;
+    return chrome.storage.local.set({ recorderOn: granted, recorderPending: null });
+  });
+}
+
+// Chrome refuses to remove *.nih.gov while the required *.era.nih.gov
+// overlaps it on some versions, so fall back to the parts it will remove.
+// Without webRequest nothing more is recorded either way.
+async function removeRecorderPermissions() {
+  var attempts = [
+    recorderLib.PERMISSIONS,
+    { permissions: ["webRequest"], origins: ["https://*.login.gov/*"] },
+    { permissions: ["webRequest"] }
+  ];
+  for (var i = 0; i < attempts.length; i += 1) {
+    try {
+      if (await chrome.permissions.remove(attempts[i])) return true;
+    } catch (error) {
+      // Try the next, smaller set.
+    }
+  }
+  return false;
+}
+
+// Stops recording; the recording itself is kept until Clear.
+function turnRecorderOff() {
+  var saved = chrome.storage.local.set({ recorderOn: false, recorderPending: null });
+  return Promise.all([saved, removeRecorderPermissions()]);
+}
+
+async function downloadRecording(button) {
+  var recording = await recorderLib.readRecording(chrome.storage.local);
+  if (!recording.events.length) {
+    flash(button, "Nothing recorded", "Download recording");
+    return;
+  }
+  var now = Date.now();
+  var file = recorderLib.exportRecording(recording, {
+    extensionVersion: chrome.runtime.getManifest().version,
+    exportedAt: now
+  });
+  var url = URL.createObjectURL(new Blob([JSON.stringify(file)], { type: "application/json" }));
+  var link = document.createElement("a");
+  link.href = url;
+  link.download = recorderLib.exportFileName(now);
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
 }
 
 function load() {
@@ -217,6 +323,32 @@ enabled.addEventListener("change", function () {
 pingServer.addEventListener("change", function () {
   chrome.storage.local.set({ pingServer: pingServer.checked });
 });
+if (recorderOn) {
+  recorderOn.addEventListener("change", function () {
+    return recorderOn.checked ? turnRecorderOn() : turnRecorderOff();
+  });
+}
+var downloadButton = document.getElementById("download-recording");
+if (downloadButton) {
+  downloadButton.addEventListener("click", function (event) {
+    var button = event.currentTarget;
+    return downloadRecording(button).catch(function (error) {
+      console.warn("eRA Keep Alive: could not download the recording", error);
+      flash(button, "Download failed", "Download recording");
+    });
+  });
+}
+var clearButton = document.getElementById("clear-recording");
+if (clearButton) {
+  clearButton.addEventListener("click", function (event) {
+    var button = event.currentTarget;
+    return chrome.runtime.sendMessage({ type: "recorder-clear" }).then(function (reply) {
+      flash(button, reply && reply.ok ? "Cleared" : "Clear failed", "Clear recording");
+    }, function () {
+      flash(button, "Clear failed", "Clear recording");
+    });
+  });
+}
 document.getElementById("copy-log").addEventListener("click", async function (event) {
   var button = event.currentTarget;
   try {
@@ -228,5 +360,7 @@ document.getElementById("copy-log").addEventListener("click", async function (ev
   window.setTimeout(function () { button.textContent = "Copy log"; }, 1500);
 });
 chrome.storage.onChanged.addListener(function (changes, area) {
-  if (area === "local") load();
+  if (area !== "local") return;
+  if (Object.keys(changes).every(isRecorderKey)) loadRecorder();
+  else load();
 });

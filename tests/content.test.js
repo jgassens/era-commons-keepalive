@@ -99,7 +99,7 @@ function makePage(options) {
       sendMessage: function (message) { calls.sent.push(message); return Promise.resolve(); }
     },
     storage: {
-      local: { get: function () { return Promise.resolve({ enabled: options.enabled, sessionStatus: options.sessionStatus || "unknown" }); } },
+      local: { get: function () { return Promise.resolve({ enabled: options.enabled, sessionStatus: options.sessionStatus || "unknown", recorderOn: !!options.recorderOn }); } },
       onChanged: listenerSlot()
     }
   };
@@ -129,6 +129,16 @@ function makePage(options) {
     clearTimeout: function (id) { if (timers[id - 1]) timers[id - 1].cancelled = true; },
     setInterval: function (fn, ms) { timers.push({ fn: fn, at: clock.now + ms, repeat: ms }); return timers.length; },
     clearInterval: function (id) { if (timers[id - 1]) timers[id - 1].cancelled = true; }
+  };
+  var windowListeners = {};
+  context.addEventListener = function (type, fn) { (windowListeners[type] = windowListeners[type] || []).push(fn); };
+  context.removeEventListener = function (type, fn) {
+    var list = windowListeners[type] || [];
+    var index = list.indexOf(fn);
+    if (index !== -1) list.splice(index, 1);
+  };
+  context.fireWindow = function (type, event) {
+    (windowListeners[type] || []).slice().forEach(function (fn) { fn(Object.assign({ type: type }, event)); });
   };
   context.window = context;
   vm.createContext(context);
@@ -358,4 +368,60 @@ test("Continue is not pressed while the stored session status is logged-out, and
   });
   page.advance(5 * MINUTE);
   assert.equal(page.continueButton.clicks, 1);
+});
+
+function recorderMessages(page) {
+  return page.calls.sent.filter(function (message) { return message.type === "recorder-page-event"; });
+}
+
+test("with the recorder off, no page events are reported", async function () {
+  var page = makePage({ recorderOn: false });
+  page.load();
+  await flush();
+  page.context.document.dispatchEvent({ type: "visibilitychange" });
+  page.context.fireWindow("pagehide", { persisted: false });
+  page.modal.visible = true;
+  page.advance(15000);
+  assert.deepEqual(recorderMessages(page), []);
+});
+
+test("with the recorder on, page load, visibility, pageshow/pagehide, the timeout modal and path changes are reported", async function () {
+  var page = makePage({ recorderOn: true, enabled: false });
+  page.load();
+  await flush();
+  page.context.document.visibilityState = "hidden";
+  page.context.document.dispatchEvent({ type: "visibilitychange" });
+  page.context.fireWindow("pageshow", { persisted: true });
+  page.context.fireWindow("pagehide", { persisted: false });
+  page.modal.visible = true;
+  page.advance(15000);
+  page.modal.visible = false;
+  page.context.location.pathname = "/commonsplus/other.era";
+  page.advance(15000);
+
+  var sent = recorderMessages(page);
+  assert.deepEqual(sent.map(function (m) { return m.what; }),
+    ["load", "visibilitychange", "pageshow", "pagehide", "modal-shown", "navigate", "modal-hidden"]);
+  assert.equal(sent[1].visibility, "hidden");
+  assert.equal(sent[2].persisted, true);
+  assert.equal(sent[4].modal, "sessionTimeoutModalDialog");
+  assert.equal(sent[5].fromPath, "/commonsplus/home.era");
+  assert.equal(sent[5].path, "/commonsplus/other.era");
+  // Switched off, the modal is only recorded, never pressed.
+  assert.equal(page.continueButton.clicks, 0);
+  sent.forEach(function (m) { assert.equal(JSON.stringify(m).indexOf("JSESSIONID"), -1); });
+});
+
+test("the recorder switch turned on later starts page events; turned off stops them", async function () {
+  var page = makePage({ recorderOn: false });
+  page.load();
+  await flush();
+  function change(value) {
+    page.chrome.storage.onChanged.listeners.forEach(function (fn) { fn({ recorderOn: { newValue: value } }, "local"); });
+  }
+  change(true);
+  assert.deepEqual(recorderMessages(page).map(function (m) { return m.what; }), ["load"]);
+  change(false);
+  page.context.document.dispatchEvent({ type: "visibilitychange" });
+  assert.equal(recorderMessages(page).length, 1);
 });

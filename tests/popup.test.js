@@ -50,22 +50,50 @@ function renderPopup(state, options) {
   var ids = ["enabled", "ping-server", "status", "status-subtext", "status-block", "details",
     "dt-signed-in", "signed-in", "dt-last-nudge", "last-nudge",
     "dt-server-checkin", "server-checkin", "dt-last-click", "last-click",
-    "session-pattern", "logout-records", "diagnostic-log", "copy-log", "version", "open-tab"];
+    "session-pattern", "logout-records", "diagnostic-log", "copy-log", "version", "open-tab",
+    "recorder", "recorder-on", "recorder-count", "download-recording", "clear-recording"];
   var elements = {};
   ids.forEach(function (id) { elements[id] = fakeElement(id === "logout-records" ? "div" : "div"); });
   var warnings = [];
   var tabsCreated = [];
+  var calls = { permissionRequests: [], permissionRemovals: [], sets: [], sent: [], downloads: [], blobs: [] };
+  var body = fakeElement("body");
   var context = {
     console: { warn: function () { warnings.push(Array.from(arguments)); }, log: function () {}, error: function () {} },
     document: {
+      body: body,
       getElementById: function (id) { return elements[id] || null; },
-      createElement: fakeElement
+      createElement: function (tag) {
+        var created = fakeElement(tag);
+        created.click = function () { calls.downloads.push({ href: created.href, download: created.download }); };
+        created.remove = function () {};
+        return created;
+      }
     },
+    Blob: function (parts, init) { calls.blobs.push({ text: parts.join(""), type: init && init.type }); this.index = calls.blobs.length - 1; },
+    URL: {
+      createObjectURL: function (blob) { return "blob:fake/" + blob.index; },
+      revokeObjectURL: function () {}
+    },
+    calls: calls,
     navigator: { clipboard: { writeText: async function (text) { context.copied = text; } } },
     window: { setTimeout: function () {} },
     tabsCreated: tabsCreated,
     chrome: {
+      permissions: {
+        request: function (perms) {
+          calls.permissionRequests.push(JSON.parse(JSON.stringify(perms)));
+          if (options.permissionThrows) throw new Error("not a user gesture");
+          return Promise.resolve(!!options.grant);
+        },
+        remove: async function (perms) {
+          calls.permissionRemovals.push(JSON.parse(JSON.stringify(perms)));
+          if (options.removeRefuses && calls.permissionRemovals.length === 1) throw new Error("You cannot remove required permissions.");
+          return true;
+        }
+      },
       runtime: {
+        sendMessage: async function (message) { calls.sent.push(message); return { ok: true }; },
         getManifest: function () { return { version: "1.4.3" }; },
         getURL: function (path) { return "chrome-extension://fake-extension-id/" + path; }
       },
@@ -82,12 +110,21 @@ function renderPopup(state, options) {
           get: async function (defaults) {
             if (options.getFails) throw new Error("storage unavailable");
             var out = {};
+            if (defaults === null) return JSON.parse(JSON.stringify(state));
+            if (typeof defaults === "string") defaults = [defaults];
+            if (Array.isArray(defaults)) {
+              defaults.forEach(function (key) { if (key in state) out[key] = JSON.parse(JSON.stringify(state[key])); });
+              return out;
+            }
             Object.keys(defaults).forEach(function (key) {
               out[key] = key in state ? JSON.parse(JSON.stringify(state[key])) : defaults[key];
             });
             return out;
           },
-          set: async function () {}
+          set: async function (values) {
+            calls.sets.push(JSON.parse(JSON.stringify(values)));
+            Object.assign(state, JSON.parse(JSON.stringify(values)));
+          }
         },
         onChanged: { addListener: function () {} }
       }
@@ -96,6 +133,7 @@ function renderPopup(state, options) {
   context.globalThis = context;
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(ROOT, "src/matcher.js"), "utf8"), context, { filename: "src/matcher.js" });
+  vm.runInContext(fs.readFileSync(path.join(ROOT, "src/recorder.js"), "utf8"), context, { filename: "src/recorder.js" });
   vm.runInContext(fs.readFileSync(path.join(ROOT, "popup.js"), "utf8"), context, { filename: "popup.js" });
   return { elements: elements, warnings: warnings, context: context };
 }
@@ -394,4 +432,88 @@ test("the server check-in detail row is off, accepted or refused, never a bare '
   await settle();
   assert.equal(unknown.elements["dt-server-checkin"].hidden, true);
   assert.equal(unknown.elements["server-checkin"].hidden, true);
+});
+
+test("the recorder switch asks for exactly the optional permissions, straight from the click; a refusal leaves it off", async function () {
+  var popup = renderPopup({ recorderOn: false }, { grant: false });
+  await settle();
+  var sw = popup.elements["recorder-on"];
+  assert.equal(sw.checked, false);
+  sw.checked = true;
+  var done = sw.listeners.change();
+  // Asked synchronously, inside the click, before any await.
+  assert.equal(popup.context.calls.permissionRequests.length, 1);
+  assert.deepEqual(popup.context.calls.permissionRequests[0], {
+    permissions: ["webRequest"], origins: ["https://*.nih.gov/*", "https://*.login.gov/*"]
+  });
+  assert.equal(sw.checked, false);
+  await done;
+  assert.equal(sw.checked, false);
+  var last = popup.context.calls.sets[popup.context.calls.sets.length - 1];
+  assert.equal(last.recorderOn, false);
+
+  var throws = renderPopup({ recorderOn: false }, { permissionThrows: true });
+  await settle();
+  throws.elements["recorder-on"].checked = true;
+  await throws.elements["recorder-on"].listeners.change();
+  assert.equal(throws.elements["recorder-on"].checked, false);
+});
+
+test("a granted request turns the recorder on; turning it off keeps the recording and gives the permissions back", async function () {
+  var state = { recorderOn: false };
+  var popup = renderPopup(state, { grant: true, removeRefuses: true });
+  await settle();
+  var sw = popup.elements["recorder-on"];
+  sw.checked = true;
+  await sw.listeners.change();
+  assert.equal(sw.checked, true);
+  assert.equal(state.recorderOn, true);
+
+  state.recording = { count: 2, next: 1, chunks: [{ id: 0, n: 2 }] };
+  state["recording-0"] = [{ t: 1, event: "request" }, { t: 2, event: "completed" }];
+  sw.checked = false;
+  await sw.listeners.change();
+  assert.equal(state.recorderOn, false);
+  assert.ok(state.recording, "turning it off must not clear the recording");
+  // The first, full removal was refused (it overlaps the required eRA site
+  // access on some Chrome versions); a smaller one followed.
+  var removals = popup.context.calls.permissionRemovals;
+  assert.equal(removals.length, 2);
+  assert.deepEqual(removals[1].permissions, ["webRequest"]);
+});
+
+test("the popup shows the event count and downloads the recording as a JSON file; Clear asks the background", async function () {
+  var state = {
+    recorderOn: true,
+    recording: { count: 2, next: 1, chunks: [{ id: 0, n: 2 }] },
+    "recording-0": [{ t: 1, event: "request", host: "public.era.nih.gov", path: "/a" }, { t: 2, event: "completed" }],
+    recorderSalt: "do-not-export"
+  };
+  var popup = renderPopup(state);
+  await settle();
+  var e = popup.elements;
+  assert.equal(e["recorder-count"].textContent, "2 events recorded");
+  assert.equal(e["recorder-on"].checked, true);
+  assert.equal(e["download-recording"].disabled, false);
+
+  await e["download-recording"].listeners.click({ currentTarget: e["download-recording"] });
+  var calls = popup.context.calls;
+  assert.equal(calls.downloads.length, 1);
+  assert.match(calls.downloads[0].download, /^era-recording-\d{8}-\d{4}\.json$/);
+  assert.equal(calls.downloads[0].href, "blob:fake/0");
+  assert.equal(calls.blobs[0].type, "application/json");
+  var file = JSON.parse(calls.blobs[0].text);
+  assert.equal(file.count, 2);
+  assert.equal(file.events[0].path, "/a");
+  assert.equal(calls.blobs[0].text.indexOf("do-not-export"), -1);
+
+  await e["clear-recording"].listeners.click({ currentTarget: e["clear-recording"] });
+  assert.deepEqual(calls.sent.map(function (m) { return m.type; }), ["recorder-clear"]);
+  assert.equal(e["clear-recording"].textContent, "Cleared");
+
+  var empty = renderPopup({});
+  await settle();
+  assert.equal(empty.elements["recorder-count"].textContent, "No events recorded.");
+  assert.equal(empty.elements["recorder-on"].checked, false);
+  assert.equal(empty.elements["download-recording"].disabled, true);
 });

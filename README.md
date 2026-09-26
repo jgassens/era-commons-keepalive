@@ -33,6 +33,7 @@ Click the extension's toolbar icon to see its status. If the popup feels cramped
 
 - **Keep session active** turns the whole extension on or off. While it is off, nothing is scrolled, clicked, or pinged, and nothing is logged.
 - **Also ping eRA's server** is **on by default** and can be switched off. See below.
+- **Record everything (diagnostic)**, under the diagnostic log, is **off by default**. It keeps a local record of eRA and login.gov network and cookie activity for troubleshooting. See [Record everything (diagnostic)](#record-everything-diagnostic).
 - A green **ON** badge means the extension found a live eRA timer. An orange **ON!** badge means eRA's server turned down the last check-in once; the extension asks again 30 seconds later (see below). A red **!** badge and a Chrome notification mean a session the extension had seen as signed in has ended; sign in again normally. The red badge clears as soon as you load an eRA page after signing back in.
 - A grey **…** badge (status *No eRA tab open — not keeping the session alive*) means you closed every eRA tab while eRA's timer was still running. With no tab there is nothing to nudge, so the session is left to eRA's own timer. When you next open an eRA page (or Chrome restarts), the extension checks the cookie: if it is still live, you are simply logged in again with the same sign-in time; if it has run out or is gone, the logout is recorded quietly — no notification, since it happened while you were away — with the time it **probably ended** (eRA's last known logout time).
 
@@ -97,13 +98,32 @@ The collapsible **Diagnostic log** keeps up to 200 entries on your computer, sho
 | `alarm late by N min (computer asleep?)` | Chrome's 4-minute timer fired late, usually because the computer slept. |
 | `continued timeout warning /path` | The extension pressed eRA's warning **Continue** button. |
 
+## Record everything (diagnostic)
+
+The popup has one more switch, under the diagnostic log: **Record everything (diagnostic)**. It is a flight recorder. Its only job is to help find out what, if anything, eRA's site does just before eRA's server ends a session. It is **off by default**, and you do not need it for the extension to work.
+
+**Permissions.** The recorder needs two things the extension does not otherwise have: permission to watch network requests (`webRequest`), and access to `nih.gov` and `login.gov` sites. Chrome asks you for these only at the moment you turn the switch on. If you say no, the switch stays off. Turning the switch off stops recording and gives the permissions back. The recording you already have is kept until you clear it.
+
+**What it records**, on your computer only, while it is on:
+
+- **Network requests** your browser makes to any `nih.gov` or `login.gov` address: the time, the site name, the page path, the method (GET, POST…), the kind of request (page, script, image…), which tab, which site started it (or that this extension did), the status number, where a redirect pointed (site name and path), any network error, whether it came from the cache, and the **names** of cookies the server set.
+- **Cookie changes** for `nih.gov` and `login.gov` cookies: the time, name, site, path, why it changed (set, deleted, expired, overwritten), whether it lasts only for the browser session or its expiry time, its security flags, the **length** of its value, and a 6-character **fingerprint** of the value. Two equal fingerprints mean the value probably did not change. The fingerprint is made with a random secret that stays in your browser and is never put in the downloaded file, so the value cannot be worked back out from the file.
+- **Page events** on eRA pages: the tab being shown or hidden, a page being shown or left, eRA's timeout warning appearing or going away, and the page path changing.
+- **The extension's own session events**: every status change (signed in, signed out, and why), every answer from eRA's server to the keep-alive check-in, and every refusal. These mark where each session starts and ends in the recording.
+
+**What it never records:** cookie values, query strings (`?…`), page fragments (`#…`), `;jsessionid=` path parts, page content, form fields, request or response bodies, passwords, two-factor codes, or anything about sites other than `nih.gov` and `login.gov`.
+
+**Size.** It keeps the newest 20,000 events and drops older ones. It saves in batches every 2 seconds, not on every event. It is stored in pieces of 500 events, so each save rewrites only the newest piece. At roughly 250 bytes per event, a full recording is about 5 MB, half of the 10 MB Chrome gives each extension's storage (since Chrome 114). That is why the extension does **not** ask for the `unlimitedStorage` permission, which Chrome would show as a separate warning at install. If Chrome ever refuses a save for lack of space (for example on an older Chrome with a 5 MB limit), the oldest quarter of the recording is dropped and the save is tried once more.
+
+**Getting the file.** The popup shows how many events are recorded. **Download recording** saves them as a JSON file named like `era-recording-20260926-1415.json`. If the download does not start from the small popup window, use **Open in a tab** at the top of the popup and press it there. **Clear recording** deletes the recording. The recording is never uploaded or sent anywhere. It leaves your computer only if you share the downloaded file yourself.
+
 ## Important limits
 
 This extension cannot log you in, and it cannot beat any maximum session length that eRA's server enforces (there appears to be one; see above). What it can do is tell you the moment the server ends the session. Its warning-button detection is deliberately cautious; it has not yet been checked against the live eRA dialog. It will never knowingly press buttons labelled log out, sign out, end session, or cancel.
 
-The extension asks only for storage, alarms, notifications, scripting (to add itself to eRA tabs that were open before it was installed or updated), cookies, and access to `https://*.era.nih.gov/*`. It does **not** ask for Chrome's broad `tabs` permission.
+The extension asks only for storage, alarms, notifications, scripting (to add itself to eRA tabs that were open before it was installed or updated), cookies, and access to `https://*.era.nih.gov/*`. It does **not** ask for Chrome's broad `tabs` permission. The diagnostic recorder's extra permissions (`webRequest`, and access to `nih.gov` and `login.gov`) are optional: they are asked for only when you turn the recorder on (see above).
 
-The **cookies** permission is how the extension notices the moment eRA logs you out: it lets the extension see eRA's `ERA_SESSION_TIMEOUT_COOKIE` being deleted, and read that cookie's deadline when no eRA tab is open. The site access above already limits it to `era.nih.gov` cookies. The extension looks only at that one cookie, and keeps nothing from it except the logout time it holds (shown in the popup as **eRA will log you out at**).
+The **cookies** permission is how the extension notices the moment eRA logs you out: it lets the extension see eRA's `ERA_SESSION_TIMEOUT_COOKIE` being deleted, and read that cookie's deadline when no eRA tab is open. The site access above already limits it to `era.nih.gov` cookies. For keeping you signed in, the extension looks only at that one cookie, and keeps nothing from it except the logout time it holds (shown in the popup as **eRA will log you out at**). Only the diagnostic recorder, when you turn it on, notes other `nih.gov` and `login.gov` cookies, and then only as described above: never their values.
 
 ## Optional local check
 

@@ -46,6 +46,19 @@ function makeFake(options) {
   var onChanged = listenerSlot();
   var onCookieChanged = listenerSlot();
   var onNotificationClicked = listenerSlot();
+  var onPermissionsAdded = listenerSlot();
+  var onPermissionsRemoved = listenerSlot();
+  var permissions = { granted: !!options.recorderPermitted };
+  // chrome.webRequest exists only once its optional permission is granted.
+  var webRequest = null;
+  if (options.recorderPermitted) {
+    webRequest = {};
+    ["onBeforeRequest", "onHeadersReceived", "onBeforeRedirect", "onCompleted", "onErrorOccurred"].forEach(function (name) {
+      var slot = listenerSlot();
+      slot.addListener = function (fn, filter, spec) { slot.listeners.push(fn); slot.filter = filter; slot.spec = spec; };
+      webRequest[name] = slot;
+    });
+  }
   var jar = [];
   // background.js's own setTimeout calls land here instead of firing for
   // real; a test fires one by calling its .fn(). Not the queue microtasks
@@ -145,6 +158,16 @@ function makeFake(options) {
             store[key] = clone(values[key]);
           });
           onChanged.listeners.slice().forEach(function (fn) { fn(changes, "local"); });
+        },
+        remove: async function (keys) {
+          if (typeof keys === "string") keys = [keys];
+          var changes = {};
+          keys.forEach(function (key) {
+            if (!(key in store)) return;
+            changes[key] = { oldValue: clone(store[key]) };
+            delete store[key];
+          });
+          if (Object.keys(changes).length) onChanged.listeners.slice().forEach(function (fn) { fn(changes, "local"); });
         }
       },
       onChanged: onChanged
@@ -203,7 +226,13 @@ function makeFake(options) {
         if (tab && tab.page.unreachable) throw new Error("Cannot access contents of the page");
       }
     },
+    permissions: {
+      contains: async function () { return permissions.granted; },
+      onAdded: onPermissionsAdded,
+      onRemoved: onPermissionsRemoved
+    },
     runtime: {
+      getManifest: function () { return { version: "1.6.0" }; },
       onMessage: listenerSlot(),
       onInstalled: listenerSlot(),
       onStartup: listenerSlot(),
@@ -211,12 +240,18 @@ function makeFake(options) {
     }
   };
 
+  if (webRequest) chrome.webRequest = webRequest;
+
   var context = {
     chrome: chrome,
     URL: URL,
+    crypto: globalThis.crypto,
+    TextEncoder: TextEncoder,
     console: { warn: function () {}, log: function () {}, error: function () {} },
-    importScripts: function (file) {
-      vm.runInContext(fs.readFileSync(path.join(ROOT, file), "utf8"), context, { filename: file });
+    importScripts: function () {
+      Array.prototype.forEach.call(arguments, function (file) {
+        vm.runInContext(fs.readFileSync(path.join(ROOT, file), "utf8"), context, { filename: file });
+      });
     },
     // Real timers would make tests wait out the 1s badge retry; a test fires
     // one deliberately instead by calling the entry's .fn().
@@ -232,6 +267,8 @@ function makeFake(options) {
   return {
     bg: context, chrome: chrome, store: store, alarms: alarms, tabs: tabs, calls: calls, failures: failures,
     jar: jar, setEraCookie: setEraCookie, deleteEraCookie: deleteEraCookie, timers: timers,
+    permissions: permissions, webRequest: webRequest, fireCookie: fireCookie,
+    onPermissionsAdded: onPermissionsAdded, onPermissionsRemoved: onPermissionsRemoved,
     onNotificationClicked: onNotificationClicked,
     // Resolves once every status task queued so far has run.
     drain: function () { return context.serialized(function () {}); }
@@ -1219,4 +1256,218 @@ test("a cookie deletion, a login page load and a tick at the same moment notify 
   assert.equal(fake.calls.notifications.length, 1);
   var statusLines = logLines(fake).filter(function (line) { return line.includes("status logged-in -> logged-out"); });
   assert.equal(statusLines.length, 1);
+});
+
+// --- The optional diagnostic recorder ---
+
+var recorderLib = require("../src/recorder.js");
+var SECRET = "s3cr3t-cookie-VALUE-9f8e7d";
+
+function flushTimers(fake) {
+  return fake.timers.filter(function (timer) { return timer.delay === recorderLib.FLUSH_MS && !timer.fired; });
+}
+
+// Fires every pending 2-second batch and waits for its write.
+async function flushRecorder(fake) {
+  await settle();
+  flushTimers(fake).forEach(function (timer) { timer.fired = true; timer.fn(); });
+  await fake.bg.recorder.writes;
+  await settle();
+}
+
+function recordedEvents(fake) {
+  var index = fake.store.recording;
+  if (!index) return [];
+  return index.chunks.reduce(function (events, chunk) {
+    return events.concat(fake.store["recording-" + chunk.id] || []);
+  }, []);
+}
+
+// Some network and cookie activity: a keep-alive request that redirects
+// with a query string, a jsessionid and a Set-Cookie, and an eRA cookie.
+async function someActivity(fake) {
+  var url = "https://public.era.nih.gov/commonsplus/jsp/keepSessionAlive.jsp;jsessionid=ABC123?token=QQQ#frag";
+  if (fake.webRequest) {
+    fake.webRequest.onBeforeRequest.listeners.forEach(function (fn) {
+      fn({ requestId: "7", url: url, method: "GET", type: "xmlhttprequest", tabId: 3, frameId: 0, initiator: "https://public.era.nih.gov", timeStamp: 1000.4 });
+    });
+    fake.webRequest.onHeadersReceived.listeners.forEach(function (fn) {
+      fn({ requestId: "7", url: url, statusCode: 302, responseHeaders: [
+        { name: "Set-Cookie", value: "JSESSIONID=" + SECRET + "; Path=/; Secure; HttpOnly" },
+        { name: "Location", value: "/commonsplus/public/login.era?TARGET=" + SECRET }
+      ] });
+    });
+    fake.webRequest.onBeforeRedirect.listeners.forEach(function (fn) {
+      fn({ requestId: "7", url: url, method: "GET", type: "xmlhttprequest", tabId: 3, statusCode: 302, fromCache: false,
+        initiator: "chrome-extension://fake-extension-id",
+        redirectUrl: "https://public.era.nih.gov/commonsplus/public/login.era?TARGET=" + SECRET, timeStamp: 1001 });
+    });
+    fake.webRequest.onErrorOccurred.listeners.forEach(function (fn) {
+      fn({ requestId: "8", url: "https://auth.nih.gov/x?y=" + SECRET, method: "POST", type: "main_frame", tabId: 3, error: "net::ERR_ABORTED", timeStamp: 1002 });
+    });
+  }
+  await fake.fireCookie({ removed: false, cause: "explicit", cookie: {
+    name: "JSESSIONID", value: SECRET, domain: "public.era.nih.gov", path: "/commonsplus", session: true, httpOnly: true, secure: true, sameSite: "lax"
+  } });
+  await fake.fireCookie({ removed: false, cause: "explicit", cookie: {
+    name: "tracker", value: SECRET, domain: ".example.com", path: "/", session: true
+  } });
+}
+
+test("the recorder records nothing while its switch is off, even with the permissions", async function () {
+  var fake = makeFake({ storage: { recorderOn: false }, recorderPermitted: true });
+  await settle();
+  await someActivity(fake);
+  await fake.bg.handleMessage({ type: "recorder-page-event", what: "visibilitychange", path: "/x", visibility: "hidden" },
+    { url: HOME, tab: { id: 3, url: HOME } });
+  await flushRecorder(fake);
+  assert.equal(fake.store.recording, undefined);
+  assert.equal(flushTimers(fake).length, 0);
+});
+
+test("the recorder records nothing while switched on without the permissions", async function () {
+  var fake = makeFake({ storage: { recorderOn: true }, recorderPermitted: false });
+  await settle();
+  assert.equal(fake.webRequest, null);
+  await someActivity(fake);
+  await flushRecorder(fake);
+  assert.equal(fake.store.recording, undefined);
+});
+
+test("switched on and permitted, it records network, cookie, page and session events, all sanitized", async function () {
+  var fake = makeFake({ storage: { recorderOn: true, sessionStatus: "logged-in" }, recorderPermitted: true, tabs: [eraTab(1, LOGIN)] });
+  await settle();
+  assert.deepEqual(clone(fake.webRequest.onBeforeRequest.filter.urls), ["https://*.nih.gov/*", "https://*.login.gov/*"]);
+  assert.deepEqual(clone(fake.webRequest.onHeadersReceived.spec), ["responseHeaders"]);
+  assert.equal(fake.webRequest.onCompleted.spec, undefined);
+  await someActivity(fake);
+  await fake.bg.handleMessage({ type: "recorder-page-event", what: "modal-shown", modal: "sessionTimeoutModalDialog", path: "/commonsplus/home.era;jsessionid=Z?q=1", visibility: "visible" },
+    { url: HOME, tab: { id: 1, url: HOME } });
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  await flushRecorder(fake);
+
+  var events = recordedEvents(fake);
+  var kinds = events.map(function (event) { return event.event; });
+  ["request", "redirect", "error", "cookie", "page", "session"].forEach(function (kind) {
+    assert.ok(kinds.indexOf(kind) !== -1, kind + " missing: " + kinds.join(","));
+  });
+
+  var request = events.find(function (event) { return event.event === "request"; });
+  assert.equal(request.host, "public.era.nih.gov");
+  assert.equal(request.path, "/commonsplus/jsp/keepSessionAlive.jsp");
+  assert.equal(request.initiator, "https://public.era.nih.gov");
+  var redirect = events.find(function (event) { return event.event === "redirect"; });
+  assert.equal(redirect.statusCode, 302);
+  assert.equal(redirect.redirectPath, "/commonsplus/public/login.era");
+  assert.equal(redirect.initiator, "this-extension");
+  assert.equal(redirect.ext, true);
+  assert.deepEqual(clone(redirect.setCookies), ["JSESSIONID"]);
+  var error = events.find(function (event) { return event.event === "error"; });
+  assert.equal(error.error, "net::ERR_ABORTED");
+  assert.equal(error.path, "/x");
+
+  var cookies = events.filter(function (event) { return event.event === "cookie"; });
+  assert.equal(cookies.length, 1, "only nih.gov / login.gov cookies are recorded");
+  assert.equal(cookies[0].name, "JSESSIONID");
+  assert.equal(cookies[0].session, true);
+  assert.match(cookies[0].fp, /^[0-9a-f]{6}$/);
+  assert.equal(cookies[0].len, SECRET.length);
+
+  var page = events.find(function (event) { return event.event === "page"; });
+  assert.equal(page.what, "modal-shown");
+  assert.equal(page.path, "/commonsplus/home.era");
+
+  // The login-page tick ends the session; that boundary is in the recording.
+  var status = events.find(function (event) { return event.event === "session" && event.what === "status"; });
+  assert.equal(status.from, "logged-in");
+  assert.equal(status.to, "logged-out");
+
+  var everything = JSON.stringify(fake.store);
+  assert.equal(everything.indexOf(SECRET), -1, "a cookie value or query string was stored");
+  assert.equal(everything.indexOf("token=QQQ"), -1);
+  assert.equal(everything.indexOf("ABC123"), -1);
+  assert.equal(everything.indexOf("#frag"), -1);
+});
+
+test("the recorder writes in one batch every 2 seconds, not once per event", async function () {
+  var fake = makeFake({ storage: { recorderOn: true }, recorderPermitted: true });
+  await settle();
+  var writes = 0;
+  var set = fake.chrome.storage.local.set;
+  fake.chrome.storage.local.set = function (values) {
+    if ("recording" in values) writes += 1;
+    return set(values);
+  };
+  for (var i = 0; i < 50; i += 1) {
+    fake.webRequest.onCompleted.listeners.forEach(function (fn) {
+      fn({ requestId: String(i), url: "https://public.era.nih.gov/a.js", method: "GET", type: "script", tabId: 1, statusCode: 200, timeStamp: i });
+    });
+  }
+  await settle();
+  assert.equal(flushTimers(fake).length, 1);
+  assert.equal(writes, 0);
+  await flushRecorder(fake);
+  assert.equal(writes, 1);
+  assert.equal(fake.store.recording.count, 50);
+});
+
+test("session boundaries and server refusals are marked in the recording", async function () {
+  var fake = makeFake({
+    storage: { recorderOn: true, sessionStatus: "logged-in", sessionStartedAt: Date.now() - 130 * MINUTE },
+    recorderPermitted: true,
+    tabs: [eraTab(1, HOME, liveManager({ keepAliveUrl: ALIVE_URL, server: "redirect" }))]
+  });
+  await settle();
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  await fake.bg.recheckServer({ name: "era-server-recheck", scheduledTime: Date.now() });
+  await flushRecorder(fake);
+  var session = recordedEvents(fake).filter(function (event) { return event.event === "session"; });
+  var whats = session.map(function (event) { return event.what; });
+  assert.ok(whats.indexOf("server-refused") !== -1, whats.join(","));
+  assert.ok(session.some(function (event) { return event.what === "nudge" && event.serverRejected; }));
+  assert.ok(session.some(function (event) {
+    return event.what === "status" && event.to === "logged-out" && event.reason === matcher.SERVER_END_REASON;
+  }));
+});
+
+test("a permission grant answered after the popup closed still turns the recorder on", async function () {
+  var fake = makeFake({ storage: { recorderOn: false, recorderPending: Date.now() - 1000 } });
+  await settle();
+  fake.permissions.granted = true;
+  await fake.bg.onRecorderPermissionsAdded();
+  assert.equal(fake.store.recorderOn, true);
+  assert.equal(fake.store.recorderPending, null);
+
+  // A stale request (from long ago) does not.
+  var stale = makeFake({ storage: { recorderOn: false, recorderPending: Date.now() - 60 * MINUTE } });
+  await settle();
+  stale.permissions.granted = true;
+  await stale.bg.onRecorderPermissionsAdded();
+  assert.equal(stale.store.recorderOn, false);
+});
+
+test("permissions taken away switch the recorder off and stop recording, keeping the recording", async function () {
+  var fake = makeFake({ storage: { recorderOn: true }, recorderPermitted: true });
+  await settle();
+  await someActivity(fake);
+  await flushRecorder(fake);
+  var kept = fake.store.recording.count;
+  assert.ok(kept > 0);
+  fake.permissions.granted = false;
+  await fake.bg.onRecorderPermissionsRemoved();
+  assert.equal(fake.store.recorderOn, false);
+  await someActivity(fake);
+  await flushRecorder(fake);
+  assert.equal(fake.store.recording.count, kept);
+});
+
+test("clearing the recording removes every chunk", async function () {
+  var fake = makeFake({ storage: { recorderOn: true }, recorderPermitted: true });
+  await settle();
+  await someActivity(fake);
+  await flushRecorder(fake);
+  assert.ok(fake.store.recording);
+  await fake.bg.handleMessage({ type: "recorder-clear" }, {});
+  assert.deepEqual(Object.keys(fake.store).filter(function (key) { return /^recording/.test(key); }), []);
+  assert.ok(typeof fake.store.recorderSalt === "string", "the salt stays in the browser");
 });

@@ -35,6 +35,11 @@
   var observer = null;
   var pollTimer = null;
   var observerTimer = null;
+  // The optional diagnostic recorder: page events are reported only while
+  // its switch is on. The background drops them if it is not permitted.
+  var recorderOn = false;
+  var lastPath = location.pathname;
+  var modalShown = null;
 
   function stop() {
     if (stopped) return;
@@ -43,6 +48,8 @@
     window.clearInterval(pollTimer);
     window.clearTimeout(observerTimer);
     document.removeEventListener(STOP_EVENT, stop);
+    document.removeEventListener("visibilitychange", onVisibilityChange);
+    windowListeners(false);
     try {
       chrome.runtime.onMessage.removeListener(onMessage);
       chrome.storage.onChanged.removeListener(onStorageChanged);
@@ -66,6 +73,84 @@
     } catch (error) {
       stopIfOrphaned(error);
     }
+  }
+
+  function recordPage(what, extra) {
+    if (stopped || !recorderOn) return;
+    report(Object.assign({
+      type: "recorder-page-event",
+      what: what,
+      at: Date.now(),
+      path: location.pathname,
+      visibility: document.visibilityState
+    }, extra || {}));
+  }
+
+  function onVisibilityChange() {
+    recordPage("visibilitychange");
+  }
+
+  function onPageShow(event) {
+    recordPage("pageshow", { persisted: !!(event && event.persisted) });
+  }
+
+  function onPageHide(event) {
+    recordPage("pagehide", { persisted: !!(event && event.persisted) });
+  }
+
+  // eRA pages are mostly full loads, but a path change without one is still
+  // worth a line: history navigation, or the Navigation API where it exists.
+  function checkNavigation() {
+    var path = location.pathname;
+    if (path === lastPath) return;
+    recordPage("navigate", { fromPath: lastPath });
+    lastPath = path;
+  }
+
+  function windowListeners(add) {
+    var method = add ? "addEventListener" : "removeEventListener";
+    try {
+      if (typeof window[method] === "function") {
+        window[method]("pageshow", onPageShow);
+        window[method]("pagehide", onPageHide);
+        window[method]("popstate", checkNavigation);
+      }
+      if (window.navigation && typeof window.navigation[method] === "function") {
+        window.navigation[method]("navigatesuccess", checkNavigation);
+      }
+    } catch (error) {
+      // A page without these events simply records fewer of them.
+    }
+  }
+
+  function visibleKnownModal() {
+    for (var i = 0; i < KNOWN_MODAL_IDS.length; i += 1) {
+      if (isElementVisible(document.getElementById(KNOWN_MODAL_IDS[i]))) return KNOWN_MODAL_IDS[i];
+    }
+    return null;
+  }
+
+  // eRA's own timeout warning appearing or going away.
+  function checkModalForRecorder(visibleId) {
+    if (!recorderOn) return;
+    var shown = !!visibleId;
+    if (shown !== modalShown && (modalShown !== null || shown)) {
+      recordPage(shown ? "modal-shown" : "modal-hidden", { modal: visibleId || null });
+    }
+    modalShown = shown;
+  }
+
+  function recorderPoll() {
+    if (stopped || !recorderOn) return;
+    checkNavigation();
+    checkModalForRecorder(visibleKnownModal());
+  }
+
+  function recorderStarted() {
+    lastPath = location.pathname;
+    modalShown = null;
+    recordPage("load");
+    recorderPoll();
   }
 
   function isElementVisible(element) {
@@ -97,16 +182,13 @@
   // heuristic scan runs on the 15-second poll.
   function checkKnownModals() {
     observerTimer = null;
-    for (var i = 0; i < KNOWN_MODAL_IDS.length; i += 1) {
-      if (isElementVisible(document.getElementById(KNOWN_MODAL_IDS[i]))) {
-        lookForWarning();
-        return;
-      }
-    }
+    var visibleId = visibleKnownModal();
+    checkModalForRecorder(visibleId);
+    if (visibleId) lookForWarning();
   }
 
   function onMutations() {
-    if (stopped || !enabled || observerTimer !== null) return;
+    if (stopped || (!enabled && !recorderOn) || observerTimer !== null) return;
     observerTimer = window.setTimeout(checkKnownModals, OBSERVER_THROTTLE_MS);
   }
 
@@ -262,7 +344,13 @@
   }
 
   function onStorageChanged(changes, area) {
-    if (area !== "local" || (!changes.enabled && !changes.sessionStatus)) return;
+    if (area !== "local" || (!changes.enabled && !changes.sessionStatus && !changes.recorderOn)) return;
+    if (changes.recorderOn) {
+      var wasOn = recorderOn;
+      recorderOn = changes.recorderOn.newValue === true;
+      if (recorderOn && !wasOn) recorderStarted();
+    }
+    if (!changes.enabled && !changes.sessionStatus) return;
     if (changes.enabled) enabled = changes.enabled.newValue !== false;
     if (changes.sessionStatus) loggedOut = changes.sessionStatus.newValue === "logged-out";
     if (enabled && !loggedOut) lookForWarning();
@@ -271,12 +359,16 @@
   var instance = { alive: function () { return !stopped && contextAlive(); }, stop: stop };
   globalThis[INSTANCE_KEY] = instance;
   document.addEventListener(STOP_EVENT, stop);
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  windowListeners(true);
 
   chrome.runtime.onMessage.addListener(onMessage);
   chrome.storage.onChanged.addListener(onStorageChanged);
-  chrome.storage.local.get({ enabled: true, sessionStatus: "unknown" }).then(function (stored) {
+  chrome.storage.local.get({ enabled: true, sessionStatus: "unknown", recorderOn: false }).then(function (stored) {
     enabled = stored.enabled !== false;
     loggedOut = stored.sessionStatus === "logged-out";
+    recorderOn = stored.recorderOn === true;
+    if (recorderOn) recorderStarted();
     lookForWarning();
   }).catch(stopIfOrphaned);
 
@@ -287,6 +379,9 @@
     attributes: true,
     attributeFilter: ["class", "style", "aria-hidden"]
   });
-  pollTimer = window.setInterval(lookForWarning, 15000);
+  pollTimer = window.setInterval(function () {
+    lookForWarning();
+    recorderPoll();
+  }, 15000);
   reportPageState();
 })();

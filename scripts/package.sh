@@ -31,7 +31,17 @@ var manifest = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
 var files = new Set(["manifest.json"]);
 
 if (manifest.background && manifest.background.service_worker) {
-  files.add(manifest.background.service_worker);
+  var worker = manifest.background.service_worker;
+  files.add(worker);
+  // Scripts the service worker loads with importScripts("a.js", "b.js").
+  var workerSource = fs.existsSync(worker) ? fs.readFileSync(worker, "utf8") : "";
+  var importRe = /importScripts\(([^)]*)\)/g;
+  var importMatch;
+  while ((importMatch = importRe.exec(workerSource))) {
+    (importMatch[1].match(/["\x27][^"\x27]+["\x27]/g) || []).forEach(function (quoted) {
+      files.add(path.posix.normalize(path.posix.join(path.posix.dirname(worker), quoted.slice(1, -1))));
+    });
+  }
 }
 (manifest.content_scripts || []).forEach(function (entry) {
   (entry.js || []).forEach(function (f) { files.add(f); });

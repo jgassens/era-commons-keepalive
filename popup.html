@@ -121,6 +121,12 @@
       #diagnostic-log div { margin: 3px 0; }
       #copy-log { margin-top: 8px; padding: 5px 9px; font-size: 12px; }
 
+      .recorder { margin-top: 16px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--card-bg); }
+      .recorder label { font-weight: 600; font-size: 12px; }
+      #recorder-count { margin: 6px 0 0; font-size: 12px; }
+      .recorder-buttons { display: flex; gap: 8px; margin-top: 8px; }
+      .recorder-buttons button { padding: 5px 9px; font-size: 12px; }
+
       #version { margin-top: 16px; color: var(--muted); font-size: 11px; }
     </style>
   </head>
@@ -167,8 +173,19 @@
         <button id="copy-log" type="button">Copy log</button>
       </details>
 
+      <div id="recorder" class="recorder">
+        <label><input id="recorder-on" type="checkbox"> Record everything (diagnostic)</label>
+        <p id="recorder-hint" class="hint">Off by default. Records eRA and login.gov network requests, cookie changes (names only, never values) and page events, on this computer only. Turning it on asks Chrome for extra permissions.</p>
+        <p id="recorder-count">No events recorded.</p>
+        <div class="recorder-buttons">
+          <button id="download-recording" type="button">Download recording</button>
+          <button id="clear-recording" type="button">Clear recording</button>
+        </div>
+      </div>
+
       <div id="version"></div>
       <script src="src/matcher.js"></script>
+      <script src="src/recorder.js"></script>
       <script src="popup.js"></script>
     </main>
   </body>

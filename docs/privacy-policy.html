@@ -45,7 +45,7 @@
   </head>
   <body>
     <h1>Privacy Policy — Session Keeper for eRA Commons (unofficial)</h1>
-    <p class="updated">Last updated: September 25, 2026</p>
+    <p class="updated">Last updated: September 26, 2026</p>
 
     <p class="notice">
       This extension is <strong>unofficial</strong> and is <strong>not made by,
@@ -82,15 +82,55 @@
       <li><strong>eRA's own timeout cookie</strong> (<code>ERA_SESSION_TIMEOUT_COOKIE</code>)
         — read only to know when eRA itself will end your session, and
         watched only to notice the moment eRA deletes it (which is how eRA
-        signals that you have been logged out). The extension only looks at
-        this one cookie's name and expiry time; it does not read or store
-        any other cookie, on eRA or anywhere else.</li>
+        signals that you have been logged out). For keeping you signed in,
+        the extension only looks at this one cookie's name and expiry time.
+        No other cookie is ever looked at unless you switch on the optional
+        diagnostic recorder described below, and even then no cookie's value
+        is ever stored.</li>
       <li><strong>A local diagnostic log</strong> — up to 200 lines of page
         paths (with any query string, page fragment, or session ID
         stripped out), timestamps, and short event descriptions, kept only
         so you can see what the extension has been doing. It never records
         page content, form fields, or credentials of any kind.</li>
     </ul>
+
+    <h2>The optional diagnostic recorder (off by default)</h2>
+    <p>
+      The popup has a switch labeled "Record everything (diagnostic)." It is
+      <strong>off by default</strong>. It exists only to help work out what
+      eRA's site does before its server ends a session. Only when you switch
+      it on does the extension ask Chrome for two extra permissions: to watch
+      network requests (<code>webRequest</code>), and to see
+      <code>nih.gov</code> and <code>login.gov</code> sites. If you decline, it
+      stays off. Switching it off stops recording and gives those permissions
+      back.
+    </p>
+    <p>While it is on, it records, on your computer only:</p>
+    <ul>
+      <li>For each request your browser makes to an <code>nih.gov</code> or
+        <code>login.gov</code> address: the time, the site name, the page path
+        (with any query string, page fragment, or session ID stripped out),
+        the request method and kind, the HTTP status number, where a redirect
+        pointed (site name and path only), any network error, and the
+        <em>names</em> of cookies the server set.</li>
+      <li>For each <code>nih.gov</code> or <code>login.gov</code> cookie that
+        changes: its name, site, path, flags, and expiry time, the length of
+        its value, and a short salted fingerprint that shows whether the value
+        changed. <strong>The cookie's value itself is never stored.</strong></li>
+      <li>On eRA pages: when the tab is shown or hidden, when a page is shown
+        or left, when eRA's timeout warning appears or goes away, and when the
+        page path changes.</li>
+      <li>The extension's own session events (signed in, signed out, eRA's
+        server refusing a check-in).</li>
+    </ul>
+    <p>
+      It never records page content, form fields, query strings, request or
+      response bodies, passwords, two-factor codes, or cookie values. It
+      keeps at most 20,000 events, dropping the oldest. The recording is
+      never uploaded or sent anywhere: it leaves your computer only if you
+      press "Download recording" and choose to share the file yourself.
+      "Clear recording" deletes it.
+    </p>
 
     <h2>What it never does</h2>
     <ul>

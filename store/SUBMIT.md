@@ -40,7 +40,10 @@ for you in `store/listing.md`.
      **Privacy policy URL** field.
    - Under **Permission justifications**, paste in the paragraph for each
      permission from `store/listing.md` (storage, alarms, notifications,
-     scripting, cookies, and the `https://*.era.nih.gov/*` host permission).
+     scripting, cookies, and the `https://*.era.nih.gov/*` host permission),
+     plus the optional `webRequest` and `https://*.nih.gov/*` /
+     `https://*.login.gov/*` paragraph if the dashboard asks about optional
+     permissions.
    - Under **Remote code**, choose "No, I am not using remote code" and
      paste in the one-line reason from `store/listing.md`.
    - Under **Data usage**, tick the boxes and the three certifications

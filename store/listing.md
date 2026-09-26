@@ -48,6 +48,13 @@ What it does, while enabled and an eRA Commons tab is open:
   whether eRA's timer was extended — so you can see what it has been
   doing. That log never leaves your computer unless you press "Copy log"
   yourself.
+- Optional, off by default: a "Record everything (diagnostic)" switch that
+  keeps a local flight recorder of eRA and login.gov network requests,
+  cookie changes and page events, to help find out why eRA's server ends
+  sessions. It asks Chrome for extra permissions only when you switch it
+  on. It stores site names, paths and status numbers — never query
+  strings, page content or cookie values — stays on your computer, and is
+  never uploaded; you can download or clear it from the popup.
 
 What it never does:
 
@@ -134,7 +141,31 @@ logout deadline eRA itself has already set. `background.js` reads eRA's own
 `ERA_SESSION_TIMEOUT_COOKIE` with `chrome.cookies.getAll` and watches it
 with `chrome.cookies.onChanged`. It looks at that one cookie's name and
 expiry only — never its value's meaning beyond the timestamp eRA already
-put there, and never any other site's cookies.
+put there. Other cookies are seen only by the optional diagnostic recorder
+below, and only by name, never by value.
+
+**Optional permissions (asked for only when the user turns on "Record
+everything (diagnostic)"; not granted at install):**
+
+- **webRequest** (optional) — Lets the off-by-default diagnostic recorder
+  see requests to `https://*.nih.gov/*` and `https://*.login.gov/*` as they
+  happen: `background.js` adds non-blocking `chrome.webRequest` listeners
+  (`onBeforeRequest`, `onHeadersReceived`, `onBeforeRedirect`,
+  `onCompleted`, `onErrorOccurred`) that record the time, site, path
+  (query strings, fragments and session IDs stripped), method, status,
+  redirect target, error and the *names* of cookies set. It never blocks
+  or changes a request, and never reads request or response bodies.
+- **Host permissions `https://*.nih.gov/*` and `https://*.login.gov/*`**
+  (optional) — Needed for the recorder to see those requests and those
+  sites' cookie changes (`chrome.cookies.onChanged`: name, site, flags,
+  expiry, value length and a salted 6-character fingerprint — never the
+  value). eRA signs users in through login.gov and other nih.gov hosts,
+  which is exactly where a session ends. Turning the switch off gives
+  these permissions back.
+
+The recording is kept in `chrome.storage.local` (at most 20,000 events) and
+leaves the device only if the user presses "Download recording" and shares
+the file themselves.
 
 **Host permission `https://*.era.nih.gov/*`** — This is the one site the
 extension is allowed to act on at all: it scopes the content script
@@ -152,7 +183,8 @@ No, I am not using remote code.
 ```
 
 Why: every script the extension runs ships inside the package itself
-(`background.js`, `content.js`, `src/matcher.js`, `popup.js`). Nothing is
+(`background.js`, `content.js`, `src/matcher.js`, `src/recorder.js`,
+`popup.js`). Nothing is
 fetched and executed from a remote URL, there is no `eval` of downloaded
 code, and there are no `<script src="https://...">` references anywhere —
 `scripts/package.sh` builds the store package from exactly these local
@@ -171,6 +203,15 @@ leaves the device unless you personally press "Copy log" and paste it
 somewhere), and it holds page **paths** on `era.nih.gov` (with any
 `?query`, `#hash`, or session-id portion stripped) plus timestamps and
 minute counts — never page content, never form data, never credentials.
+
+**The optional diagnostic recorder:** off by default; when the user turns
+it on, it stores locally the site names, paths (stripped as above), status
+numbers and timing of requests to nih.gov and login.gov, the names and
+flags of those sites' cookies (never values), and eRA page visibility
+events. It is covered by the same **Website content** / **Web history**
+answer; add to the note: *"An optional, off-by-default diagnostic recorder
+stores request paths, status codes and cookie names (never cookie values)
+for nih.gov and login.gov locally; it is never transmitted."*
 
 **Recommended, conservative answer:** because a URL path is technically
 "web history" / "site content" even when it is local-only and stripped of

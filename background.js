@@ -1,8 +1,9 @@
 "use strict";
 
-importScripts("src/matcher.js");
+importScripts("src/matcher.js", "src/recorder.js");
 
 var matcher = globalThis.EraKeepAlive;
+var recorderLib = globalThis.EraRecorder;
 var ALARM_NAME = "era-keep-alive";
 // A one-shot second look after eRA's server first refuses a keep-alive.
 var RECHECK_ALARM_NAME = "era-server-recheck";
@@ -52,6 +53,194 @@ var logWrite = Promise.resolve();
 var statusQueue = Promise.resolve();
 var cookieLiveCheckQueued = false;
 
+// The optional diagnostic recorder. It records only while the stored
+// recorderOn switch is on AND Chrome has granted its optional permissions.
+// active is that answer cached: null while it is being worked out, when
+// events wait in pending until it is known.
+var recorder = {
+  active: null,
+  generation: 0,
+  pending: [],
+  timer: null,
+  writes: Promise.resolve(),
+  listening: false,
+  salt: null,
+  // What onHeadersReceived saw, by requestId, until the request's next event.
+  headers: new Map()
+};
+var RECORDER_HEADER_MEMORY = 500;
+// A permission prompt answered after the popup closed still turns the
+// recorder on, if it was asked for this recently.
+var RECORDER_PENDING_MS = 10 * 60 * 1000;
+
+function extensionOrigin() {
+  try {
+    return chrome.runtime.getURL("").replace(/\/$/, "");
+  } catch (error) {
+    return null;
+  }
+}
+
+async function recorderPermitted() {
+  try {
+    return !!(chrome.permissions && await chrome.permissions.contains(recorderLib.PERMISSIONS));
+  } catch (error) {
+    return false;
+  }
+}
+
+async function recorderShouldRun() {
+  var stored = await chrome.storage.local.get({ recorderOn: false });
+  return stored.recorderOn === true && await recorderPermitted();
+}
+
+// Works out whether the recorder is on; the newest call wins.
+function refreshRecorderActive() {
+  var generation = ++recorder.generation;
+  recorder.active = null;
+  return recorderShouldRun().catch(function () { return false; }).then(function (active) {
+    if (generation !== recorder.generation) return;
+    recorder.active = active;
+    if (!active) recorder.pending = [];
+    else if (recorder.pending.length) scheduleRecorderFlush();
+  });
+}
+
+function recordEvent(event) {
+  if (!event || recorder.active === false) return;
+  recorder.pending.push(event);
+  if (recorder.active === true) scheduleRecorderFlush();
+}
+
+// Events are written in one batch every FLUSH_MS, never one write per event.
+function scheduleRecorderFlush() {
+  if (recorder.timer !== null) return;
+  recorder.timer = setTimeout(flushRecording, recorderLib.FLUSH_MS);
+}
+
+function flushRecording() {
+  recorder.timer = null;
+  recorder.writes = recorder.writes.then(async function () {
+    var events = recorder.pending;
+    recorder.pending = [];
+    if (!events.length) return;
+    // Checked again at write time: the switch or a permission may have
+    // changed since these events were queued.
+    if (!(await recorderShouldRun())) {
+      recorder.active = false;
+      return;
+    }
+    await recorderLib.appendToRecording(chrome.storage.local, events);
+  }).catch(function (error) {
+    console.warn("eRA Keep Alive: could not write the diagnostic recording", error);
+  });
+  return recorder.writes;
+}
+
+function clearRecordingNow() {
+  var run = recorder.writes.then(function () {
+    recorder.pending = [];
+    return recorderLib.clearRecording(chrome.storage.local);
+  });
+  recorder.writes = run.catch(function () {});
+  return run;
+}
+
+function rememberHeaders(requestId, info) {
+  recorder.headers.delete(requestId);
+  recorder.headers.set(requestId, info);
+  while (recorder.headers.size > RECORDER_HEADER_MEMORY) {
+    recorder.headers.delete(recorder.headers.keys().next().value);
+  }
+}
+
+function takeHeaders(requestId) {
+  var info = recorder.headers.get(requestId) || null;
+  recorder.headers.delete(requestId);
+  return info;
+}
+
+function onRecordedRequest(eventName, details) {
+  if (recorder.active === false) return;
+  var headerInfo = eventName === "request" ? null : takeHeaders(details.requestId);
+  recordEvent(recorderLib.requestEvent(eventName, details, extensionOrigin(), headerInfo, Date.now()));
+}
+
+// Only Set-Cookie names and the Location target are kept from the headers.
+function onRecordedHeaders(details) {
+  if (recorder.active === false) return;
+  var names = recorderLib.setCookieNames(details.responseHeaders);
+  var location = recorderLib.locationTarget(details.responseHeaders, details.url);
+  if (names.length || location) rememberHeaders(details.requestId, { setCookies: names, location: location });
+}
+
+// chrome.webRequest exists only once its optional permission is granted, so
+// the listeners are added at start-up when it is, and otherwise the moment
+// the permission arrives.
+function registerRecorderListeners() {
+  if (recorder.listening || !chrome.webRequest) return;
+  var filter = { urls: recorderLib.URL_FILTER };
+  try {
+    chrome.webRequest.onBeforeRequest.addListener(function (details) { onRecordedRequest("request", details); }, filter);
+    chrome.webRequest.onHeadersReceived.addListener(onRecordedHeaders, filter, ["responseHeaders"]);
+    chrome.webRequest.onBeforeRedirect.addListener(function (details) { onRecordedRequest("redirect", details); }, filter);
+    chrome.webRequest.onCompleted.addListener(function (details) { onRecordedRequest("completed", details); }, filter);
+    chrome.webRequest.onErrorOccurred.addListener(function (details) { onRecordedRequest("error", details); }, filter);
+    recorder.listening = true;
+  } catch (error) {
+    console.warn("eRA Keep Alive: could not start the network recorder", error);
+  }
+}
+
+async function recorderSalt() {
+  if (recorder.salt) return recorder.salt;
+  var stored = await chrome.storage.local.get({ recorderSalt: null });
+  if (typeof stored.recorderSalt === "string" && stored.recorderSalt) {
+    recorder.salt = stored.recorderSalt;
+  } else {
+    var bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    recorder.salt = Array.prototype.map.call(bytes, function (b) { return (b < 16 ? "0" : "") + b.toString(16); }).join("");
+    await chrome.storage.local.set({ recorderSalt: recorder.salt });
+  }
+  return recorder.salt;
+}
+
+// The value is read only to fingerprint it, then dropped.
+async function onRecordedCookie(changeInfo) {
+  if (recorder.active === false || !recorderLib.isRecordedCookie(changeInfo)) return;
+  var at = Date.now();
+  try {
+    var subtle = typeof crypto !== "undefined" && crypto.subtle ? crypto.subtle : null;
+    var fingerprint = await recorderLib.fingerprintValue(changeInfo.cookie.value, subtle ? await recorderSalt() : "", subtle);
+    recordEvent(recorderLib.cookieEvent(changeInfo, fingerprint, at));
+  } catch (error) {
+    console.warn("eRA Keep Alive: could not record a cookie change", error);
+  }
+}
+
+// The popup sets recorderPending just before it asks for the permissions.
+// If the popup closed while Chrome's prompt was open, this finishes the job.
+async function onRecorderPermissionsAdded() {
+  registerRecorderListeners();
+  var stored = await chrome.storage.local.get({ recorderOn: false, recorderPending: null });
+  if (!stored.recorderOn && typeof stored.recorderPending === "number" &&
+    Date.now() - stored.recorderPending < RECORDER_PENDING_MS && await recorderPermitted()) {
+    await chrome.storage.local.set({ recorderOn: true, recorderPending: null });
+  }
+  await refreshRecorderActive();
+}
+
+// Permissions taken away (by the popup or in chrome://extensions) turn the
+// switch off, so it never shows on while nothing can be recorded.
+async function onRecorderPermissionsRemoved() {
+  if (!(await recorderPermitted())) {
+    var stored = await chrome.storage.local.get({ recorderOn: false });
+    if (stored.recorderOn) await chrome.storage.local.set({ recorderOn: false });
+  }
+  await refreshRecorderActive();
+}
+
 function getState() {
   return chrome.storage.local.get(DEFAULT_STATE);
 }
@@ -78,6 +267,9 @@ function minutesBetween(from, to) {
 // write is reported and dropped, so the chain always keeps going.
 function appendDiagnosticEntries(entries) {
   if (!entries.length) return logWrite;
+  // Session boundaries (status changes, refusals, server answers) also go
+  // into the diagnostic recording, when it is on.
+  entries.forEach(function (entry) { recordEvent(recorderLib.sessionEvent(entry)); });
   logWrite = logWrite.then(async function () {
     try {
       var stored = await chrome.storage.local.get({ diagnosticLog: [] });
@@ -717,6 +909,16 @@ function handleMessage(message, sender) {
   if (message.type === "era-page-ready") {
     return serialized(function () { return handlePageReady(message, sender); });
   }
+  if (message.type === "recorder-page-event") {
+    if (recorder.active !== false) {
+      var tab = sender && sender.tab;
+      recordEvent(recorderLib.pageEvent(message, (sender && sender.url) || (tab && tab.url), tab ? tab.id : null, Date.now()));
+    }
+    return Promise.resolve();
+  }
+  if (message.type === "recorder-clear") {
+    return clearRecordingNow();
+  }
   return Promise.resolve();
 }
 
@@ -805,13 +1007,35 @@ chrome.alarms.onAlarm.addListener(function (alarm) {
   });
 });
 
-chrome.runtime.onMessage.addListener(function (message, sender) {
-  handleMessage(message, sender).catch(function (error) {
+chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
+  var run = handleMessage(message, sender);
+  run.catch(function (error) {
     console.warn("eRA Keep Alive: message handling failed", error);
   });
+  // The popup waits to hear that the recording is really gone.
+  if (message && message.type === "recorder-clear") {
+    run.then(function () { sendResponse({ ok: true }); }, function () { sendResponse({ ok: false }); });
+    return true;
+  }
 });
 
 chrome.cookies.onChanged.addListener(onCookieChanged);
+chrome.cookies.onChanged.addListener(onRecordedCookie);
+
+if (chrome.permissions && chrome.permissions.onAdded) {
+  chrome.permissions.onAdded.addListener(function () {
+    onRecorderPermissionsAdded().catch(function (error) {
+      console.warn("eRA Keep Alive: could not start the recorder", error);
+    });
+  });
+  chrome.permissions.onRemoved.addListener(function () {
+    onRecorderPermissionsRemoved().catch(function (error) {
+      console.warn("eRA Keep Alive: could not stop the recorder", error);
+    });
+  });
+}
+registerRecorderListeners();
+refreshRecorderActive();
 
 chrome.notifications.onClicked.addListener(function (notificationId) {
   if (notificationId !== "era-session-ended") return;
@@ -822,6 +1046,13 @@ chrome.notifications.onClicked.addListener(function (notificationId) {
 });
 
 chrome.storage.onChanged.addListener(function (changes, area) {
+  if (area === "local" && changes.recorderOn) {
+    refreshRecorderActive().then(function () {
+      if (changes.recorderOn.newValue === true) {
+        recordEvent({ t: Date.now(), event: "recorder", what: "on", version: chrome.runtime.getManifest ? chrome.runtime.getManifest().version : null });
+      }
+    });
+  }
   if (area !== "local" || !changes.enabled) return;
   serialized(function () { return handleEnabledChange(changes.enabled.newValue); }).catch(function (error) {
     console.warn("eRA Keep Alive: could not apply the on/off switch", error);
