@@ -29,10 +29,11 @@ clicking.
 
 What it does, while enabled and an eRA Commons tab is open:
 
-- Every 4 minutes, it sends eRA's own page a harmless scroll signal — the
-  same kind of "you're still here" signal a real scroll or click would send.
-  This does not move your page, change anything on screen, or click
-  anything you didn't ask it to.
+- Roughly every 3 to 5 minutes (the exact gap varies each time rather than
+  firing on a fixed schedule), it sends eRA's own page a harmless scroll
+  signal — the same kind of "you're still here" signal a real scroll or
+  click would send. This does not move your page, change anything on
+  screen, or click anything you didn't ask it to.
 - If eRA's own timeout warning pops up anyway, it presses that warning's
   own "Continue" button for you.
 - By default it also calls eRA's own keep-alive web address directly —
