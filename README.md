@@ -1,6 +1,6 @@
-# eRA Commons Keep Alive
+# Session Keeper for eRA Commons (unofficial)
 
-This small, unofficial Chrome extension helps keep **your own** NIH eRA Commons session active on **your own computer**.
+This small, unofficial Chrome extension helps keep **your own** NIH eRA Commons session active on **your own computer**. It is not made by, or affiliated with, NIH or eRA Commons.
 
 eRA logs you out 45 minutes after your last click, key press, or scroll in an eRA page. Reading and moving the mouse do not count. eRA keeps that deadline in a cookie called `ERA_SESSION_TIMEOUT_COOKIE`, and eRA's own page script pushes it 45 minutes ahead each time it sees activity.
 
@@ -12,13 +12,15 @@ It never reads, saves, fills, or sends passwords, two-factor codes, or any other
 
 Privacy policy: https://jgassens.github.io/era-commons-keepalive/privacy-policy.html
 
+Download: [latest release](https://github.com/jgassens/era-commons-keepalive/releases/latest)
+
 ## Install it in Chrome
 
-1. Download or open this extension folder on your computer.
+1. Download the [latest release](https://github.com/jgassens/era-commons-keepalive/releases/latest) zip and unzip it. Or clone this repository and choose its folder.
 2. In Chrome, go to `chrome://extensions`.
 3. Turn on **Developer mode** (top right).
 4. Choose **Load unpacked**.
-5. Select this folder (the one containing `manifest.json`).
+5. Select the unzipped folder (the one containing `manifest.json`).
 6. Open eRA Commons and sign in normally yourself.
 
 When the extension is installed, updated, or Chrome starts, it adds itself to eRA tabs that are already open. You do not need to reload them. If a tab still cannot be reached, the log says **could not reach tab (reload it)**; reloading that tab fixes it.
