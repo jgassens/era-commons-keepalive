@@ -4,9 +4,9 @@ This small, unofficial Chrome extension helps keep **your own** NIH eRA Commons 
 
 eRA logs you out 45 minutes after your last click, key press, or scroll in an eRA page. Reading and moving the mouse do not count. eRA keeps that deadline in a cookie called `ERA_SESSION_TIMEOUT_COOKIE`, and eRA's own page script pushes it 45 minutes ahead each time it sees activity.
 
-While an eRA tab is open, this extension sends the page a harmless scroll signal every 4 minutes, so eRA's own script pushes the deadline ahead. The signal does not move the page or click anything. If eRA shows its session-timeout warning anyway, the extension presses that warning's **Continue** button.
+While an eRA tab is open, this extension sends the page a harmless scroll signal every 3 to 5 minutes (the exact gap varies each time, rather than firing on an exact clock), so eRA's own script pushes the deadline ahead. The signal does not move the page or click anything. If eRA shows its session-timeout warning anyway, the extension presses that warning's **Continue** button.
 
-When eRA logs you out — its own timer ran out, or you pressed **Logout** — eRA's page deletes that cookie first. The extension watches for exactly that deletion, so it notices the logout the moment it happens, not at the next 4-minute check.
+When eRA logs you out — its own timer ran out, or you pressed **Logout** — eRA's page deletes that cookie first. The extension watches for exactly that deletion, so it notices the logout the moment it happens, not at the next check-in.
 
 It never reads, saves, fills, or sends passwords, two-factor codes, or any other credentials. It never tries to log you in.
 
@@ -41,9 +41,9 @@ Click the extension's toolbar icon to see its status. If the popup feels cramped
 
 eRA's own page calls a check-in address (`keepSessionAlive.jsp`) on eRA's server every 40 minutes while its timer is live. Keeping eRA's **page timer** alive turned out not to be enough: logs showed eRA's **server** ending sessions it had not heard from in about 60–77 minutes, even while the page timer still had 45 minutes left. With this switch on, a 58-minute stretch without clicking survived.
 
-So since version 1.4.3 the switch is **on by default**. Updating from an older version turns it on once; if you then switch it off, it stays off. With the switch on, every 4 minutes the extension calls that check-in address once per eRA application (not once per tab) and records the answer. The call goes only to eRA's own keep-alive address on eRA's own site. It gives up on a call after 15 seconds and logs **server timeout**. With the switch off, the extension still nudges eRA's page but does not call the server.
+So since version 1.4.3 the switch is **on by default**. Updating from an older version turns it on once; if you then switch it off, it stays off. With the switch on, on every nudge (every 3 to 5 minutes) the extension calls that check-in address once per eRA application (not once per tab) and records the answer. The call goes only to eRA's own keep-alive address on eRA's own site. It gives up on a call after 15 seconds and logs **server timeout**. With the switch off, the extension still nudges eRA's page but does not call the server.
 
-If the server answers with a redirect instead, the extension does not follow it to the login page. A redirect means the server refused the check-in. One refusal could be a blip, so the extension logs **server refused keep-alive — rechecking in 30 s**, turns the badge orange, shows *Refused at …* in the popup's **Last server check-in** line, and asks the server once more 30 seconds later. If the server accepts, everything goes back to normal. If it refuses a second time in a row, or an eRA tab lands on eRA's login page while the recheck is pending, the session has ended — see the next section. If no eRA tab can be pinged when the recheck is due, it tries again every 30 seconds, up to three times, and then leaves the question to the next 4-minute check.
+If the server answers with a redirect instead, the extension does not follow it to the login page. A redirect means the server refused the check-in. One refusal could be a blip, so the extension logs **server refused keep-alive — rechecking in 30 s**, turns the badge orange, shows *Refused at …* in the popup's **Last server check-in** line, and asks the server once more 30 seconds later. If the server accepts, everything goes back to normal. If it refuses a second time in a row, or an eRA tab lands on eRA's login page while the recheck is pending, the session has ended — see the next section. If no eRA tab can be pinged when the recheck is due, it tries again every 30 seconds, up to three times, and then leaves the question to the next regular check.
 
 ### "eRA ended your session — log in again"
 
@@ -87,15 +87,15 @@ The collapsible **Diagnostic log** keeps up to 200 entries on your computer, sho
 | `server rejected (redirect)` | eRA's server sent a redirect instead of a normal answer. |
 | `server refused keep-alive — rechecking in 30 s (/path)` | The server turned the check-in down once. The extension asks again in 30 seconds; a second refusal in a row ends the session. |
 | `server recheck: no eRA tab to ping — trying again in 30 s (1 of 3)` | The recheck was due but no eRA tab had a live timer to ping from. It tries again, up to three times. |
-| `server recheck: still no eRA tab to ping — the next regular check will ask eRA's server` | Three retries found no tab to ping; the refusal stays pending for the next 4-minute check. |
+| `server recheck: still no eRA tab to ping — the next regular check will ask eRA's server` | Three retries found no tab to ping; the refusal stays pending for the next regular check. |
 | `server rejected keep-alive (redirect) …; eRA timer still live, still nudging` | Written by versions before 1.5.0, which kept nudging after a refusal. |
 | `server timeout` | The server did not answer within 15 seconds. |
 | `server error` | The call failed to get any answer (for example, no network). |
 | `page load /path: …` | You opened an eRA page; shows its timer. For a login page it shows the timer that page still saw, if any. |
 | `status logged-in -> logged-out: reason` | The extension's view of your session changed, and why. `eRA's server ended the session (keep-alive refused)` means the server refused two check-ins in a row. `eRA timer cookie deleted` means eRA's page deleted its cookie (its timer ran out, or you pressed Logout). A login or logout page counts only when eRA's cookie is gone too; while the cookie is live, the session is still counted as signed in. If the login page itself still saw eRA's timer running, the reason is `eRA sent you to its login page while its page timer still had N min left — eRA's server ended the session`. |
-| `no eRA tabs open, cookie 30.0 min; not keeping the session alive …` | All eRA tabs are closed, but eRA's timer cookie is still live. Status goes to idle and the 4-minute timer stops because there is no tab to nudge; it starts again when you open an eRA page. |
+| `no eRA tabs open, cookie 30.0 min; not keeping the session alive …` | All eRA tabs are closed, but eRA's timer cookie is still live. Status goes to idle and the check-in timer stops because there is no tab to nudge; it starts again when you open an eRA page. |
 | `no eRA tabs open, cookie deleted` | All eRA tabs are closed and the cookie is gone. A session that was signed in is recorded as a logout; otherwise status goes back to unknown. |
-| `alarm late by N min (computer asleep?)` | Chrome's 4-minute timer fired late, usually because the computer slept. |
+| `alarm late by N min (computer asleep?)` | Chrome fired the check-in alarm late, usually because the computer slept. |
 | `continued timeout warning /path` | The extension pressed eRA's warning **Continue** button. |
 
 ## Record everything (diagnostic)

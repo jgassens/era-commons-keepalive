@@ -11,8 +11,11 @@ var RECHECK_DELAY_MINUTES = 0.5;
 // A recheck that finds no eRA tab to ping from tries again this many times,
 // then leaves the refusal to the next regular tick.
 var RECHECK_MAX_RETRIES = 3;
-var NUDGE_PERIOD_MINUTES = 4;
-var LATE_ALARM_MS = 60 * 1000;
+// The keep-alive alarm fires at a jittered delay, not a fixed period; see
+// matcher.nextNudgeDelayMinutes(). A firing more than this late past its
+// scheduledTime is worth logging (computer asleep, etc).
+var LATE_ALARM_SLACK_MINUTES = 2;
+var LATE_ALARM_MS = (matcher.NUDGE_MAX_MINUTES + LATE_ALARM_SLACK_MINUTES) * 60 * 1000;
 // eRA rewrites its cookie on every click, key press and scroll. The stored
 // logout time is refreshed only when it moves by at least this much.
 var LOGOUT_AT_STEP_MS = 60 * 1000;
@@ -342,7 +345,7 @@ async function configureAlarm() {
   }
   var existing = await chrome.alarms.get(ALARM_NAME);
   if (!existing) {
-    await chrome.alarms.create(ALARM_NAME, { periodInMinutes: NUDGE_PERIOD_MINUTES });
+    await chrome.alarms.create(ALARM_NAME, { delayInMinutes: matcher.nextNudgeDelayMinutes() });
   }
 }
 
@@ -788,6 +791,11 @@ async function runTick(alarm, options) {
     await appendDiagnosticEntries(entries);
     await applyResults(results, at, { nudged: true, cookie: await readEraCookie(Date.now()) });
     if (options.forcePing && !results.some(function (result) { return result.serverCalled; })) await rearmRecheck(at);
+    // The keep-alive alarm is a one-shot: Chrome drops it once it fires, so
+    // every completed tick with an eRA tab open schedules the next one itself
+    // (jittered, not a fixed period). configureAlarm() only creates one when
+    // none exists, so this never doubles up with a concurrent reschedule.
+    await configureAlarm();
   } catch (error) {
     console.warn("eRA Keep Alive: nudge failed", error);
   }

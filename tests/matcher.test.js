@@ -257,6 +257,24 @@ test("formats minutes to one decimal", function () {
   assert.equal(matcher.formatTime(null), "Never");
 });
 
+test("nextNudgeDelayMinutes stays within [NUDGE_MIN_MINUTES, NUDGE_MAX_MINUTES] and varies across seeds", function () {
+  assert.equal(matcher.nextNudgeDelayMinutes(function () { return 0; }), matcher.NUDGE_MIN_MINUTES);
+  assert.equal(matcher.nextNudgeDelayMinutes(function () { return 1; }), matcher.NUDGE_MAX_MINUTES);
+  assert.equal(matcher.nextNudgeDelayMinutes(function () { return 0.5; }),
+    (matcher.NUDGE_MIN_MINUTES + matcher.NUDGE_MAX_MINUTES) / 2);
+
+  var seen = {};
+  for (var seed = 0; seed <= 10; seed += 1) {
+    var delay = matcher.nextNudgeDelayMinutes(function () { return seed / 10; });
+    assert.ok(delay >= matcher.NUDGE_MIN_MINUTES && delay <= matcher.NUDGE_MAX_MINUTES);
+    seen[delay] = true;
+  }
+  assert.ok(Object.keys(seen).length > 1);
+
+  // Falls back to Math.random when no generator is given.
+  assert.ok(typeof matcher.nextNudgeDelayMinutes() === "number");
+});
+
 test("identifies pages excluded from status and page-load tracking", function () {
   assert.equal(matcher.isIgnoredEraUrl("https://www.era.nih.gov/news"), true);
   assert.equal(matcher.isIgnoredEraUrl("https://public.era.nih.gov/erahelp/commons/index.htm"), true);
@@ -475,14 +493,14 @@ test("formats server timeouts, server warnings and the no-tabs cookie state", fu
   );
   assert.equal(
     logAt({ type: "no-tabs", from: "logged-in", to: "logged-in", cookie: "live", minsLeft: 30 }),
-    "10:04 no eRA tabs open, cookie 30.0 min; still logged in, nothing to nudge (4-minute timer stopped)"
+    "10:04 no eRA tabs open, cookie 30.0 min; still logged in, nothing to nudge (check-in timer stopped)"
   );
   assert.equal(logAt({ type: "no-tabs", from: "logged-in", to: "logged-out", cookie: "missing", minsLeft: null }), "10:04 no eRA tabs open, cookie deleted");
   assert.equal(
     logAt({ type: "no-tabs", from: "logged-in", to: "idle", cookie: "live", minsLeft: 30 }),
-    "10:04 no eRA tabs open, cookie 30.0 min; not keeping the session alive until an eRA tab is open (4-minute timer stopped)"
+    "10:04 no eRA tabs open, cookie 30.0 min; not keeping the session alive until an eRA tab is open (check-in timer stopped)"
   );
-  assert.equal(logAt({ type: "no-tabs", from: "logged-in", to: "logged-in", cookie: null }), "10:04 no eRA tabs open, cookie unreadable; still logged in, nothing to nudge (4-minute timer stopped)");
+  assert.equal(logAt({ type: "no-tabs", from: "logged-in", to: "logged-in", cookie: null }), "10:04 no eRA tabs open, cookie unreadable; still logged in, nothing to nudge (check-in timer stopped)");
 });
 
 test("formats session lengths and names eRA's apparent session limit", function () {

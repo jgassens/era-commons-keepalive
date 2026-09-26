@@ -90,6 +90,19 @@
     return null;
   }
 
+  // The keep-alive alarm's next delay is picked at random from this range
+  // (minutes) rather than a fixed period, so it does not repeat with
+  // machine-regularity.
+  var NUDGE_MIN_MINUTES = 3;
+  var NUDGE_MAX_MINUTES = 5;
+
+  // A random delay in [NUDGE_MIN_MINUTES, NUDGE_MAX_MINUTES] minutes for the
+  // next keep-alive alarm. random is injectable for tests; defaults to Math.random.
+  function nextNudgeDelayMinutes(random) {
+    random = typeof random === "function" ? random : Math.random;
+    return NUDGE_MIN_MINUTES + random() * (NUDGE_MAX_MINUTES - NUDGE_MIN_MINUTES);
+  }
+
   var ERA_COOKIE_NAME = "ERA_SESSION_TIMEOUT_COOKIE";
 
   // The cookie's value is eRA's logout-at time in epoch milliseconds.
@@ -395,7 +408,7 @@
       return { tone: "neutral", text: "No eRA tab open — not keeping the session alive" };
     }
     if (state.sessionStatus === "logged-in") {
-      // The eRA page timer is pushed forward by the extension every 4
+      // The eRA page timer is pushed forward by the extension every few
       // minutes, so its "log you out at" time is not a real deadline; the
       // last nudge is the honest thing to show instead.
       var lastCheckIn = isFiniteNumber(state.lastNudgeAt) ? clockTime(state.lastNudgeAt) : null;
@@ -619,8 +632,8 @@
       }
       var cookieText = entry.cookie ? ", " + describeCookie(entry.minsLeft) : ", cookie unreadable";
       return prefix + "no eRA tabs open" + cookieText +
-        (entry.to === "idle" ? "; not keeping the session alive until an eRA tab is open (4-minute timer stopped)" :
-          entry.to === "logged-in" ? "; still logged in, nothing to nudge (4-minute timer stopped)" : "");
+        (entry.to === "idle" ? "; not keeping the session alive until an eRA tab is open (check-in timer stopped)" :
+          entry.to === "logged-in" ? "; still logged in, nothing to nudge (check-in timer stopped)" : "");
     }
     if (entry.type === "server-refused") {
       return prefix + "server refused keep-alive — rechecking in 30 s (" + path + ")";
@@ -659,6 +672,9 @@
 
   return {
     isVersionBefore: isVersionBefore,
+    NUDGE_MIN_MINUTES: NUDGE_MIN_MINUTES,
+    NUDGE_MAX_MINUTES: NUDGE_MAX_MINUTES,
+    nextNudgeDelayMinutes: nextNudgeDelayMinutes,
     textOf: textOf,
     isTimeoutWarningText: isTimeoutWarningText,
     isContinueButtonText: isContinueButtonText,

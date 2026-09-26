@@ -366,7 +366,7 @@ test("no eRA tabs but a live cookie goes idle, stops the alarm and does not noti
     cookie: logoutAt,
     tabs: [eraTab(9, "https://www.era.nih.gov/news")]
   });
-  fake.alarms["era-keep-alive"] = { name: "era-keep-alive", periodInMinutes: 4 };
+  fake.alarms["era-keep-alive"] = { name: "era-keep-alive", scheduledTime: Date.now() + 4 * MINUTE };
   await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
   assert.equal(fake.store.sessionStatus, "idle");
   assert.equal(fake.store.sessionStartedAt, 5);
@@ -378,7 +378,7 @@ test("no eRA tabs but a live cookie goes idle, stops the alarm and does not noti
   assert.equal(fake.calls.sent.length, 0);
   assert.equal(fake.calls.badgeText[fake.calls.badgeText.length - 1], "…");
   assert.ok(logLines(fake).some(function (line) {
-    return /no eRA tabs open, cookie 30\.0 min; not keeping the session alive until an eRA tab is open \(4-minute timer stopped\)$/.test(line);
+    return /no eRA tabs open, cookie 30\.0 min; not keeping the session alive until an eRA tab is open \(check-in timer stopped\)$/.test(line);
   }), logLines(fake).join("\n"));
 });
 
@@ -387,7 +387,7 @@ test("no eRA tabs and no cookie after logged-in records the logout", async funct
     storage: { sessionStatus: "logged-in", sessionStartedAt: Date.now() - 20 * MINUTE, eraLogoutAt: Date.now() + MINUTE },
     tabs: []
   });
-  fake.alarms["era-keep-alive"] = { name: "era-keep-alive", periodInMinutes: 4 };
+  fake.alarms["era-keep-alive"] = { name: "era-keep-alive", scheduledTime: Date.now() + 4 * MINUTE };
   await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
   assert.equal(fake.store.sessionStatus, "logged-out");
   assert.equal(fake.store.eraLogoutAt, null);
@@ -454,7 +454,7 @@ test("one keep-alive refusal only warns and schedules a 30-second recheck", asyn
     storage: { sessionStatus: "logged-in", pingServer: true, sessionStartedAt: 7 },
     tabs: [eraTab(1, HOME, liveManager({ keepAliveUrl: ALIVE_URL, server: "redirect" }))]
   });
-  fake.alarms["era-keep-alive"] = { name: "era-keep-alive", periodInMinutes: 4 };
+  fake.alarms["era-keep-alive"] = { name: "era-keep-alive", scheduledTime: Date.now() + 4 * MINUTE };
   await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
   await fake.drain();
   assert.equal(fake.store.sessionStatus, "logged-in");
@@ -509,7 +509,7 @@ test("two refusals in a row end the session with one record and one notification
   var fake = serverEndFake();
   var acceptedAt = fake.store.lastServerAcceptedAt;
   var startedAt = fake.store.sessionStartedAt;
-  fake.alarms["era-keep-alive"] = { name: "era-keep-alive", periodInMinutes: 4 };
+  fake.alarms["era-keep-alive"] = { name: "era-keep-alive", scheduledTime: Date.now() + 4 * MINUTE };
   await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
   var firstRefusalAt = fake.store.firstRefusalAt;
   assert.equal(fake.calls.notifications.length, 0);
@@ -712,7 +712,7 @@ test("a login page while a refusal is pending confirms the server end (page load
   for (var via of ["page-ready", "recheck", "tick"]) {
     var fake = serverEndFake();
     var startedAt = fake.store.sessionStartedAt;
-    fake.alarms["era-keep-alive"] = { name: "era-keep-alive", periodInMinutes: 4 };
+    fake.alarms["era-keep-alive"] = { name: "era-keep-alive", scheduledTime: Date.now() + 4 * MINUTE };
     await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
     var firstRefusalAt = fake.store.firstRefusalAt;
     assert.equal(typeof firstRefusalAt, "number");
@@ -752,7 +752,7 @@ test("a login page with no refusal pending is still judged by the cookie", async
 test("a recheck with no tab to ping is re-armed three times, then left to the regular tick", async function () {
   var fake = serverEndFake();
   var startedAt = fake.store.sessionStartedAt;
-  fake.alarms["era-keep-alive"] = { name: "era-keep-alive", periodInMinutes: 4 };
+  fake.alarms["era-keep-alive"] = { name: "era-keep-alive", scheduledTime: Date.now() + 4 * MINUTE };
   await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
   var firstRefusalAt = fake.store.firstRefusalAt;
 
@@ -838,7 +838,7 @@ test("a storage failure does not stop later ticks or later log writes", async fu
 
 test("a login page load ends a logged-in session immediately", async function () {
   var fake = makeFake({ storage: { sessionStatus: "logged-in" }, tabs: [eraTab(1, LOGIN)] });
-  fake.alarms["era-keep-alive"] = { name: "era-keep-alive", periodInMinutes: 4 };
+  fake.alarms["era-keep-alive"] = { name: "era-keep-alive", scheduledTime: Date.now() + 4 * MINUTE };
   await fake.bg.handleMessage(pageReady({ path: "/commonsplus/public/login.era", isLoginPage: true, managerPresent: false, minsLeft: null }), { tab: { id: 1 } });
   assert.equal(fake.store.sessionStatus, "logged-out");
   assert.equal(fake.store.logoutRecords.length, 1);
@@ -915,6 +915,31 @@ test("a late alarm is logged", async function () {
   assert.ok(logLines(fake).some(function (line) { return /alarm late by 30\.0 min \(computer asleep\?\)/.test(line); }));
 });
 
+test("an alarm a couple minutes late (within jitter range) is not flagged as late", async function () {
+  var fake = makeFake({ storage: { sessionStatus: "logged-in" }, tabs: [eraTab(1, HOME, liveManager())] });
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() - 3 * MINUTE });
+  assert.ok(!logLines(fake).some(function (line) { return /alarm late/.test(line); }));
+});
+
+test("the keep-alive alarm is a self-rescheduling one-shot within [3, 5] minutes, not a fixed period", async function () {
+  var fake = makeFake({ storage: { sessionStatus: "logged-in" }, tabs: [eraTab(1, HOME, liveManager())] });
+  // Nothing scheduled yet; a tick (as if the alarm just fired and Chrome
+  // dropped the one-shot alarm) must schedule the next one itself.
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  var alarm = fake.alarms["era-keep-alive"];
+  assert.ok(alarm);
+  assert.equal(alarm.periodInMinutes, undefined);
+  assert.equal(typeof alarm.delayInMinutes, "number");
+  assert.ok(alarm.delayInMinutes >= 3 && alarm.delayInMinutes <= 5);
+});
+
+test("a tick never doubles up the keep-alive alarm when one is already scheduled", async function () {
+  var fake = makeFake({ storage: { sessionStatus: "logged-in" }, tabs: [eraTab(1, HOME, liveManager())] });
+  fake.alarms["era-keep-alive"] = { name: "era-keep-alive", delayInMinutes: 4.2 };
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  assert.equal(fake.alarms["era-keep-alive"].delayInMinutes, 4.2);
+});
+
 test("the post-nudge logout time comes straight from the cookie", async function () {
   var fake = makeFake({ storage: { sessionStatus: "logged-in" }, tabs: [eraTab(1, HOME, liveManager())] });
   await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
@@ -927,7 +952,7 @@ test("eRA deleting its cookie while logged-in ends the session at once, with one
     cookie: Date.now() + 40 * MINUTE,
     tabs: [eraTab(1, HOME, liveManager())]
   });
-  fake.alarms["era-keep-alive"] = { name: "era-keep-alive", periodInMinutes: 4 };
+  fake.alarms["era-keep-alive"] = { name: "era-keep-alive", scheduledTime: Date.now() + 4 * MINUTE };
   await fake.deleteEraCookie("expired_overwrite");
   await fake.drain();
   assert.equal(fake.store.sessionStatus, "logged-out");
@@ -1061,7 +1086,7 @@ test("a login tab with a live cookie stays logged-in and keeps nudging", async f
     cookie: Date.now() + 30 * MINUTE,
     tabs: [eraTab(1, LOGIN), eraTab(2, "https://public.era.nih.gov/commons/authi/public/do?action=logout", { unreachable: true })]
   });
-  fake.alarms["era-keep-alive"] = { name: "era-keep-alive", periodInMinutes: 4 };
+  fake.alarms["era-keep-alive"] = { name: "era-keep-alive", scheduledTime: Date.now() + 4 * MINUTE };
   await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
   await fake.bg.handleMessage(pageReady({ path: "/commonsplus/public/login.era", isLoginPage: true, managerPresent: false, minsLeft: null }), { tab: { id: 1 } });
   await fake.drain();
