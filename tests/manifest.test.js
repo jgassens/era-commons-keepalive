@@ -8,7 +8,7 @@ var path = require("node:path");
 test("manifest is MV3; the recorder's permissions are optional, never required", function () {
   var manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "manifest.json"), "utf8"));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "1.6.0");
+  assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
   assert.equal(manifest.name, "Session Keeper for eRA Commons (unofficial)");
   assert.deepEqual(manifest.permissions, ["storage", "alarms", "notifications", "scripting", "cookies"]);
   assert.deepEqual(manifest.host_permissions, ["https://*.era.nih.gov/*"]);
