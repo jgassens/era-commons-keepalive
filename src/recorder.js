@@ -199,7 +199,7 @@
 
   // Diagnostic-log entries that mark session boundaries. Their fields are
   // already safe (paths went through safePath); only `type`/`at` are renamed.
-  var SESSION_TYPES = ["status", "server-refused", "server-recheck-retry", "server-recheck-deferred", "no-tabs", "auto-click"];
+  var SESSION_TYPES = ["page-refresh", "page-refresh-skipped", "status", "server-refused", "server-recheck-retry", "server-recheck-deferred", "no-tabs", "auto-click"];
   function sessionEvent(entry) {
     if (!entry || typeof entry !== "object") return null;
     var mirrored = SESSION_TYPES.indexOf(entry.type) !== -1 || (entry.type === "nudge" && entry.serverCalled);

@@ -49,8 +49,10 @@ function makePage(options) {
   options = Object.assign({ enabled: true, logoutAt: Date.now() + 30 * MINUTE, manager: true, modalVisible: false, eraPage: true }, options);
   var timers = [];
   var clock = { now: 0 };
+  var epoch = Date.now();
+  class TestDate extends Date { static now() { return epoch + clock.now; } }
   var docListeners = {};
-  var calls = { sent: [], fetches: [], scrolls: 0 };
+  var calls = { sent: [], fetches: [], scrolls: 0, reloads: 0 };
   var cookie = { logoutAt: options.logoutAt };
 
   var continueButton = element("extendSessionBtn", { text: "Continue" });
@@ -112,8 +114,9 @@ function makePage(options) {
 
   var context = {
     chrome: chrome,
+    Date: TestDate,
     document: document,
-    location: { href: "https://public.era.nih.gov/commonsplus/home.era", pathname: "/commonsplus/home.era" },
+    location: { href: "https://public.era.nih.gov/commonsplus/home.era", pathname: "/commonsplus/home.era", reload: function () { calls.reloads += 1; } },
     URL: URL,
     Event: Event,
     CustomEvent: CustomEvent,
@@ -424,4 +427,86 @@ test("the recorder switch turned on later starts page events; turned off stops t
   change(false);
   page.context.document.dispatchEvent({ type: "visibilitychange" });
   assert.equal(recorderMessages(page).length, 1);
+});
+
+
+test("trusted input reports the last activity in a burst; synthetic input never counts", async function () {
+  var page = makePage();
+  page.load();
+  await flush();
+  page.context.document.dispatchEvent({ type: "scroll", isTrusted: false });
+  page.context.document.dispatchEvent({ type: "click", isTrusted: false });
+  page.advance(1000);
+  assert.equal((await page.send({ type: "probe" })).lastUserActivityAt, null);
+  page.context.document.dispatchEvent({ type: "keydown", isTrusted: true });
+  page.advance(500);
+  page.context.document.dispatchEvent({ type: "pointermove", isTrusted: true });
+  var latest = page.context.Date.now();
+  page.advance(500);
+  var activity = page.calls.sent.filter(function (m) { return m.type === "era-user-activity"; });
+  assert.equal(activity.length, 1);
+  assert.equal(activity[0].at, latest);
+  assert.equal((await page.send({ type: "probe" })).lastUserActivityAt, latest);
+  await page.send({ type: "nudge-activity", ping: false });
+  page.advance(1000);
+  assert.equal(page.calls.sent.filter(function (m) { return m.type === "era-user-activity"; }).length, 1);
+});
+
+test("disabled or logged-out pages do not report activity", async function () {
+  for (var options of [{ enabled: false }, { sessionStatus: "logged-out" }]) {
+    var page = makePage(options);
+    page.load();
+    await flush();
+    page.context.document.dispatchEvent({ type: "click", isTrusted: true });
+    page.advance(1000);
+    assert.equal(page.calls.sent.filter(function (m) { return m.type === "era-user-activity"; }).length, 0);
+  }
+});
+
+test("stopping removes input listeners and cancels pending activity reports", async function () {
+  var page = makePage();
+  page.load();
+  await flush();
+  page.context.document.dispatchEvent({ type: "click", isTrusted: true });
+  page.context.__eraKeepAliveContent.stop();
+  page.advance(1000);
+  page.context.document.dispatchEvent({ type: "keydown", isTrusted: true });
+  page.advance(1000);
+  assert.equal(page.calls.sent.filter(function (m) { return m.type === "era-user-activity"; }).length, 0);
+});
+
+
+test("a live page reloads, but unsaved edits, form actions and recent input prevent reloads", async function () {
+  for (var condition of ["live", "edited", "action", "recent", "disabled", "logged-out", "expired"]) {
+    var page = makePage({ enabled: condition !== "disabled", sessionStatus: condition === "logged-out" ? "logged-out" : "logged-in", logoutAt: condition === "expired" ? null : Date.now() + 30 * MINUTE });
+    page.load();
+    await flush();
+    var cutoff = page.context.Date.now();
+    if (condition === "action") page.context.location.pathname = "/assist/researchPlan/save.era";
+    if (condition === "recent") {
+      page.advance(1);
+      page.context.document.dispatchEvent({ type: "click", isTrusted: true });
+    }
+    if (condition === "edited") {
+      page.context.document.dispatchEvent({ type: "input", isTrusted: true });
+      page.advance(14 * MINUTE);
+      cutoff = page.context.Date.now();
+    }
+    var reply = await page.send({ type: "refresh-page", activityCutoff: cutoff });
+    assert.equal(reply.refreshed, condition === "live", condition);
+    assert.equal(page.calls.reloads, condition === "live" ? 1 : 0, condition);
+  }
+});
+
+
+test("edits made before injection also prevent a refresh", async function () {
+  var page = makePage();
+  page.context.document.querySelectorAll = function (selector) {
+    return selector === "input, textarea, select" ? [{ type: "text", value: "changed", defaultValue: "original" }] : [];
+  };
+  page.load();
+  await flush();
+  var reply = await page.send({ type: "refresh-page", activityCutoff: page.context.Date.now() });
+  assert.equal(reply.reason, "unsaved edits");
+  assert.equal(page.calls.reloads, 0);
 });

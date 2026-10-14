@@ -150,6 +150,8 @@
 
       <dl id="details" class="details">
         <dt id="dt-signed-in">Signed in since</dt><dd id="signed-in"></dd>
+        <dt id="dt-last-activity">Last website activity</dt><dd id="last-activity"></dd>
+        <dt id="dt-next-refresh">Next idle refresh</dt><dd id="next-refresh"></dd>
         <dt id="dt-last-nudge">Last activity nudge</dt><dd id="last-nudge"></dd>
         <dt id="dt-server-checkin">Last server check-in</dt><dd id="server-checkin"></dd>
         <dt id="dt-last-click">Last "Continue" click</dt><dd id="last-click"></dd>
@@ -161,6 +163,8 @@
         <label><input id="ping-server" type="checkbox"> Also ping eRA's server</label>
         <p class="hint">Needed: eRA's server ends sessions it hasn't heard from.</p>
       </div>
+
+      <p class="hint">Refreshes after 13 minutes of inactivity, with up to one minute of random variation. Pages with unsaved edits are skipped.</p>
 
       <p id="session-pattern" hidden></p>
 

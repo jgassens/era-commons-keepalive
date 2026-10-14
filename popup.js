@@ -6,6 +6,8 @@ var defaults = {
   sessionStatus: "unknown",
   sessionStartedAt: null,
   lastNudgeAt: null,
+  lastUserActivityAt: null,
+  nextNudgeAt: null,
   eraLogoutAt: null,
   lastAutoClick: null,
   serverWarning: null,
@@ -169,6 +171,9 @@ function renderDetails(state) {
   detailRow("dt-signed-in", "signed-in",
     (state.sessionStatus === "logged-in" || state.sessionStatus === "idle") && isNumber(state.sessionStartedAt) ?
       matcher.formatTime(state.sessionStartedAt) : null);
+  detailRow("dt-last-activity", "last-activity", isNumber(state.lastUserActivityAt) ? matcher.formatTime(state.lastUserActivityAt) : null);
+  detailRow("dt-next-refresh", "next-refresh", state.enabled && state.sessionStatus !== "logged-out" &&
+    isNumber(state.nextNudgeAt) ? matcher.formatTime(state.nextNudgeAt) : null);
   detailRow("dt-last-nudge", "last-nudge", isNumber(state.lastNudgeAt) ? matcher.formatTime(state.lastNudgeAt) : null);
   detailRow("dt-server-checkin", "server-checkin", matcher.serverCheckInStatus(state));
   detailRow("dt-last-click", "last-click", isNumber(state.lastAutoClick) ? matcher.formatTime(state.lastAutoClick) : null);

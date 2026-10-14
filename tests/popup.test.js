@@ -48,6 +48,7 @@ function fakeElement(tag) {
 function renderPopup(state, options) {
   options = options || {};
   var ids = ["enabled", "ping-server", "status", "status-subtext", "status-block", "details",
+    "dt-last-activity", "last-activity", "dt-next-refresh", "next-refresh",
     "dt-signed-in", "signed-in", "dt-last-nudge", "last-nudge",
     "dt-server-checkin", "server-checkin", "dt-last-click", "last-click",
     "session-pattern", "logout-records", "diagnostic-log", "copy-log", "version", "open-tab",
@@ -301,7 +302,7 @@ test("a server-ended record gets the keep-the-ping-on note in the popup", async 
   assert.match(card.textContent, /Keep "Also ping eRA's server" on\./);
 });
 
-test("a server-ended session shows in the status line, with each session's length and eRA's apparent limit", async function () {
+test("a server-ended session shows in the status line, with each session's length and observed session lengths", async function () {
   var start = Date.UTC(2026, 8, 25, 17, 50);
   function serverEnd(minutes, dayOffset) {
     var startedAt = start - dayOffset * 86400000;
@@ -327,10 +328,10 @@ test("a server-ended session shows in the status line, with each session's lengt
   assert.equal(e.status.textContent, "Signed out — log in to eRA again. " + matcher.serverEndStatus(latest));
   assert.equal(e["status-block"].classList.contains("tone-bad"), true);
   assert.equal(e["session-pattern"].hidden, false);
-  assert.equal(e["session-pattern"].textContent, "eRA seems to end sessions about 2 h 9 min after sign-in (seen 2 times).");
+  assert.equal(e["session-pattern"].textContent, "Some recorded sessions ended about 2 h 9 min after sign-in (seen 2 times).");
   var cards = e["logout-records"].children;
   assert.match(cards[0].textContent, /Session length 2 h 10 min/);
-  assert.match(cards[0].textContent, /fixed session limit/);
+  assert.match(cards[0].textContent, /successful background check-in/);
   assert.match(cards[1].textContent, /Session length 2 h 8 min/);
 
   // Signed in again: the status line is the normal one; the pattern stays.
@@ -406,7 +407,7 @@ test("a server-end pattern sentence shows as a muted line under the green status
   assert.equal(withPattern.elements["status-block"].classList.contains("tone-ok"), true);
   assert.equal(withPattern.elements["status-subtext"].hidden, false);
   assert.equal(withPattern.elements["status-subtext"].textContent,
-    "eRA seems to end sessions about 2 h 10 min after sign-in (seen 2 times).");
+    "Some recorded sessions ended about 2 h 10 min after sign-in (seen 2 times).");
   // The standalone pattern line stays hidden while signed in — the same
   // sentence is already the status subtext, so it is not said twice.
   assert.equal(withPattern.elements["session-pattern"].hidden, true);

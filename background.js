@@ -37,6 +37,9 @@ var DEFAULT_STATE = {
   // When the last eRA tab closed while the session was live ("idle").
   idleSince: null,
   lastUserPageLoadAt: null,
+  lastUserActivityAt: null,
+  nextNudgeAt: null,
+  pendingRefreshes: {},
   lastAutoClick: null,
   lastServerResult: null,
   serverWarning: null,
@@ -336,17 +339,59 @@ async function configureAlarm() {
   var state = await getState();
   if (!state.enabled || state.sessionStatus === "logged-out") {
     await chrome.alarms.clear(ALARM_NAME);
+    await setState({ nextNudgeAt: null });
     return;
   }
   var tabs = await queryEraTabs();
   if (!tabs.length) {
     await chrome.alarms.clear(ALARM_NAME);
+    await setState({ nextNudgeAt: null });
     return;
   }
   var existing = await chrome.alarms.get(ALARM_NAME);
   if (!existing) {
-    await chrome.alarms.create(ALARM_NAME, { delayInMinutes: matcher.nextNudgeDelayMinutes() });
+    var nextAt = typeof state.nextNudgeAt === "number" ? state.nextNudgeAt :
+      Date.now() + matcher.nextNudgeDelayMinutes() * 60000;
+    await setState({ nextNudgeAt: nextAt });
+    await chrome.alarms.create(ALARM_NAME, { when: nextAt });
   }
+}
+
+// One deadline for the eRA session, shared across its tabs. Only a newer
+// real interaction changes it; cookie writes and extension nudges do not.
+async function noteUserActivity(at) {
+  var now = Date.now();
+  var state = await getState();
+  if (!state.enabled || state.sessionStatus === "logged-out" ||
+      typeof at !== "number" || !Number.isFinite(at) || at > now ||
+      (typeof state.lastUserActivityAt === "number" && at <= state.lastUserActivityAt)) return false;
+  var nextAt = at + matcher.nextNudgeDelayMinutes() * 60000;
+  await setState({ lastUserActivityAt: at, nextNudgeAt: nextAt });
+  await chrome.alarms.clear(ALARM_NAME);
+  await configureAlarm();
+  return true;
+}
+
+async function noteLatestActivity(probes, state) {
+  var latest = probes.reduce(function (value, probe) {
+    var activityAt = probe.reply && probe.reply.lastUserActivityAt;
+    return matcher.classifyTabResult(probe.result, state.sessionStatus) === "active" &&
+      typeof activityAt === "number" && Number.isFinite(activityAt) && activityAt <= Date.now() ?
+      Math.max(value, activityAt) : value;
+  }, state.lastUserActivityAt || 0);
+  if (latest > (state.lastUserActivityAt || 0)) return noteUserActivity(latest);
+  return false;
+}
+
+async function handleUserActivity(message, sender) {
+  var url = sender && sender.tab && (sender.url || sender.tab.url);
+  if (!url) return;
+  try {
+    var parsed = new URL(url);
+    if (parsed.protocol !== "https:" || !parsed.hostname.endsWith(".era.nih.gov") ||
+        matcher.isIgnoredEraUrl(url) || matcher.isLoginUrl(url)) return;
+  } catch (error) { return; }
+  await noteUserActivity(message.at);
 }
 
 // Tabs that were open before the extension was installed, updated or
@@ -709,6 +754,7 @@ async function handleNoTabs(state, at, entries) {
   });
   await appendDiagnosticEntries(entries);
   await chrome.alarms.clear(ALARM_NAME);
+  await setState({ nextNudgeAt: null });
 }
 
 function nudgeEraTabs(alarm) {
@@ -758,6 +804,15 @@ async function runTick(alarm, options) {
     }
 
     var probes = await probeTabs(tabs);
+    if (!options.forcePing) {
+      // A final read closes the gap while input messages are being batched.
+      await noteLatestActivity(probes, state);
+      state = await getState();
+      if (typeof state.nextNudgeAt === "number" && Date.now() < state.nextNudgeAt) {
+        await configureAlarm();
+        return;
+      }
+    }
     if (state.sessionStatus === "idle") {
       var probed = probes.map(function (probe) { return probe.result; });
       state = await resolveIdle(state, at, {
@@ -795,6 +850,32 @@ async function runTick(alarm, options) {
     // every completed tick with an eRA tab open schedules the next one itself
     // (jittered, not a fixed period). configureAlarm() only creates one when
     // none exists, so this never doubles up with a concurrent reschedule.
+    if (!options.forcePing) {
+      // Input may have arrived during a server request, before its batched
+      // activity message. Keep the new deadline anchored to that input.
+      var after = await getState();
+      var finalProbes = await probeTabs(await queryEraTabs());
+      if (await noteLatestActivity(finalProbes, after)) return;
+      if (after.sessionStatus === "logged-in" && !after.serverWarning) {
+        var pending = {};
+        finalProbes.forEach(function (probe) {
+          if (matcher.classifyTabResult(probe.result, after.sessionStatus) === "active") pending[probe.tab.id] = Date.now();
+        });
+        await setState({ pendingRefreshes: pending });
+        await Promise.all(finalProbes.map(async function (probe) {
+          if (matcher.classifyTabResult(probe.result, after.sessionStatus) !== "active") return;
+          var reply = await sendToTab(probe.tab, { type: "refresh-page", activityCutoff: at });
+          if (!reply || !reply.refreshed) delete pending[probe.tab.id];
+          if (!reply) return;
+          await appendDiagnosticEntries([{
+            type: reply.refreshed ? "page-refresh" : "page-refresh-skipped",
+            at: Date.now(), path: probe.result.path, reason: reply.reason || null
+          }]);
+        }));
+        await setState({ pendingRefreshes: pending });
+      }
+      await setState({ nextNudgeAt: null });
+    }
     await configureAlarm();
   } catch (error) {
     console.warn("eRA Keep Alive: nudge failed", error);
@@ -806,6 +887,14 @@ async function handlePageReady(message, sender) {
   if (!state.enabled || message.ignored) return;
   var at = message.at || Date.now();
   var senderTab = sender && sender.tab;
+  var pending = Object.assign({}, state.pendingRefreshes);
+  var refreshAt = senderTab && pending[senderTab.id];
+  var autoLoad = typeof refreshAt === "number" && typeof message.loadedAt === "number" &&
+    message.loadedAt >= refreshAt && message.loadedAt - refreshAt < 2 * 60000;
+  if (senderTab && refreshAt !== undefined) {
+    delete pending[senderTab.id];
+    await setState({ pendingRefreshes: pending });
+  }
   var result = {
     tabId: senderTab ? senderTab.id : null,
     path: matcher.safePath(message.path),
@@ -822,7 +911,7 @@ async function handlePageReady(message, sender) {
     managerPresent: result.managerPresent,
     minsLeft: matcher.roundMinutes(result.minsLeftBefore)
   }]);
-  if (!result.isLoginPage && result.managerPresent) await setState({ lastUserPageLoadAt: at });
+  if (!autoLoad && !result.isLoginPage && result.managerPresent) await setState({ lastUserPageLoadAt: at });
 
   if (state.sessionStatus === "idle") {
     state = await resolveIdle(state, at, {
@@ -848,7 +937,16 @@ async function handlePageReady(message, sender) {
       .filter(function (other) { return result.tabId === null || other.tabId !== result.tabId; });
     await applyResults([result].concat(others), at, { cookie: await readEraCookie(Date.now()) });
   }
-  if (!result.isLoginPage) await configureAlarm();
+  if (!result.isLoginPage) {
+    if (classification === "active" && !autoLoad) {
+      var activityAt = typeof message.loadedAt === "number" ? message.loadedAt : at;
+      // On first injection we cannot know what happened after an old page
+      // loaded. Start a full countdown instead of immediately refreshing it.
+      if (typeof state.lastUserActivityAt !== "number") activityAt = Math.max(activityAt, at);
+      await noteUserActivity(activityAt);
+    }
+    await configureAlarm();
+  }
 }
 
 // A cookie event is only a trigger: the cookie is read again from Chrome
@@ -914,6 +1012,9 @@ function handleMessage(message, sender) {
       await appendDiagnosticEntries([{ type: "auto-click", at: clickAt, path: matcher.safePath(message.path) }]);
     })();
   }
+  if (message.type === "era-user-activity") {
+    return serialized(function () { return handleUserActivity(message, sender); });
+  }
   if (message.type === "era-page-ready") {
     return serialized(function () { return handlePageReady(message, sender); });
   }
@@ -934,6 +1035,7 @@ async function handleEnabledChange(newValue) {
   if (!newValue) {
     await chrome.alarms.clear(ALARM_NAME);
     await chrome.alarms.clear(RECHECK_ALARM_NAME);
+    await setState({ nextNudgeAt: null });
   } else {
     var prior = await getState();
     // A session eRA's server ended stays ended: the old tab's live cookie
@@ -993,8 +1095,12 @@ async function startUp(defaultsToFill, details) {
     var fill = installDefaults(stored, details);
     if (Object.keys(fill).length) await setState(fill);
   }
+  if (defaultsToFill) {
+    await chrome.alarms.clear(ALARM_NAME);
+    await setState({ nextNudgeAt: null });
+  }
   await injectIntoOpenTabs();
-  await configureAlarm();
+  await serialized(configureAlarm);
   await updateBadge();
 }
 

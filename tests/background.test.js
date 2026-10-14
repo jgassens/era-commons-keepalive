@@ -38,10 +38,12 @@ function eraTab(id, url, page) {
 
 function makeFake(options) {
   options = options || {};
+  var clock = { now: null };
+  class TestDate extends Date { static now() { return clock.now === null ? Date.now() : clock.now; } }
   var store = Object.assign({}, clone(options.storage || {}));
   var alarms = {};
   var tabs = options.tabs || [];
-  var calls = { notifications: [], executeScript: [], badgeText: [], sent: [], tabsCreated: [], notificationsCleared: [] };
+  var calls = { reloads: [], notifications: [], executeScript: [], badgeText: [], sent: [], tabsCreated: [], notificationsCleared: [] };
   var failures = { get: 0, setDiagnosticLog: 0, cookies: 0, action: options.actionFailures || 0 };
   var onChanged = listenerSlot();
   var onCookieChanged = listenerSlot();
@@ -91,11 +93,16 @@ function makeFake(options) {
 
   function reply(tab, message) {
     var page = tab.page;
-    var now = Date.now();
+    var now = TestDate.now();
     var minsLeft = typeof page.logoutAt === "number" ? (page.logoutAt - now) / MINUTE : null;
     var urlPath = new URL(tab.url).pathname;
+    if (message.type === "refresh-page") {
+      if (page.unsavedEdits) return { refreshed: false, reason: "unsaved edits" };
+      calls.reloads.push(tab.id);
+      return { refreshed: true };
+    }
     if (message.type === "probe") {
-      return { path: urlPath, managerPresent: page.managerPresent, logoutAt: page.logoutAt, minsLeft: minsLeft, keepAliveUrl: page.keepAliveUrl, disabled: !!page.disabled };
+      return { path: urlPath, managerPresent: page.managerPresent, logoutAt: page.logoutAt, minsLeft: minsLeft, keepAliveUrl: page.keepAliveUrl, lastUserActivityAt: page.lastUserActivityAt, disabled: !!page.disabled };
     }
     var result = {
       path: urlPath,
@@ -244,6 +251,7 @@ function makeFake(options) {
 
   var context = {
     chrome: chrome,
+    Date: TestDate,
     URL: URL,
     crypto: globalThis.crypto,
     TextEncoder: TextEncoder,
@@ -265,7 +273,7 @@ function makeFake(options) {
   vm.runInContext(fs.readFileSync(path.join(ROOT, "background.js"), "utf8"), context, { filename: "background.js" });
 
   return {
-    bg: context, chrome: chrome, store: store, alarms: alarms, tabs: tabs, calls: calls, failures: failures,
+    clock: clock, bg: context, chrome: chrome, store: store, alarms: alarms, tabs: tabs, calls: calls, failures: failures,
     jar: jar, setEraCookie: setEraCookie, deleteEraCookie: deleteEraCookie, timers: timers,
     permissions: permissions, webRequest: webRequest, fireCookie: fireCookie,
     onPermissionsAdded: onPermissionsAdded, onPermissionsRemoved: onPermissionsRemoved,
@@ -273,6 +281,12 @@ function makeFake(options) {
     // Resolves once every status task queued so far has run.
     drain: function () { return context.serialized(function () {}); }
   };
+}
+
+async function fireKeepAlive(fake) {
+  fake.clock.now = fake.store.nextNudgeAt || Date.now();
+  delete fake.alarms["era-keep-alive"];
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: fake.clock.now });
 }
 
 async function settle() {
@@ -556,7 +570,7 @@ test("two refusals in a row end the session with one record and one notification
 test("the second refusal may come from the next regular tick, and the notification omits an unknown sign-in", async function () {
   var fake = serverEndFake({ sessionStartedAt: null });
   await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
-  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  await fireKeepAlive(fake);
   assert.equal(fake.store.sessionStatus, "logged-out");
   assert.equal(fake.store.logoutRecords.length, 1);
   assert.equal(fake.calls.notifications.length, 1);
@@ -568,9 +582,9 @@ test("an accepted ping between two refusals resets the count, so nothing ends", 
   var fake = serverEndFake();
   await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
   fake.tabs[0].page.server = "ok";
-  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  await fireKeepAlive(fake);
   fake.tabs[0].page.server = "redirect";
-  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  await fireKeepAlive(fake);
   await fake.drain();
   assert.equal(fake.store.sessionStatus, "logged-in");
   assert.equal((fake.store.logoutRecords || []).length, 0);
@@ -632,7 +646,7 @@ test("after a server end, an accepted ping restores logged-in as a new session",
     assert.equal(typeof fake.store.serverEndedAt, "number");
     fake.tabs[0].page.server = "ok";
     var at = Date.now();
-    await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+    await fireKeepAlive(fake);
     assert.equal(fake.store.sessionStatus, "logged-in", prior);
     assert.equal(fake.store.serverEndedAt, null);
     assert.ok(fake.store.sessionStartedAt >= at);
@@ -921,7 +935,7 @@ test("an alarm a couple minutes late (within jitter range) is not flagged as lat
   assert.ok(!logLines(fake).some(function (line) { return /alarm late/.test(line); }));
 });
 
-test("the keep-alive alarm is a self-rescheduling one-shot within [3, 5] minutes, not a fixed period", async function () {
+test("the keep-alive alarm is a self-rescheduling one-shot within [12, 14] minutes, not a fixed period", async function () {
   var fake = makeFake({ storage: { sessionStatus: "logged-in" }, tabs: [eraTab(1, HOME, liveManager())] });
   // Nothing scheduled yet; a tick (as if the alarm just fired and Chrome
   // dropped the one-shot alarm) must schedule the next one itself.
@@ -929,8 +943,9 @@ test("the keep-alive alarm is a self-rescheduling one-shot within [3, 5] minutes
   var alarm = fake.alarms["era-keep-alive"];
   assert.ok(alarm);
   assert.equal(alarm.periodInMinutes, undefined);
-  assert.equal(typeof alarm.delayInMinutes, "number");
-  assert.ok(alarm.delayInMinutes >= 3 && alarm.delayInMinutes <= 5);
+  assert.equal(typeof alarm.when, "number");
+  var delay = (alarm.when - Date.now()) / MINUTE;
+  assert.ok(delay >= 11.99 && delay <= 14);
 });
 
 test("a tick never doubles up the keep-alive alarm when one is already scheduled", async function () {
@@ -1495,4 +1510,131 @@ test("clearing the recording removes every chunk", async function () {
   await fake.bg.handleMessage({ type: "recorder-clear" }, {});
   assert.deepEqual(Object.keys(fake.store).filter(function (key) { return /^recording/.test(key); }), []);
   assert.ok(typeof fake.store.recorderSalt === "string", "the salt stays in the browser");
+});
+
+
+test("activity in either eRA tab resets a shared deadline to exactly 12, 13 or 14 minutes", async function () {
+  for (var seed of [0, 0.5, 1]) {
+    var fake = makeFake({ storage: { sessionStatus: "logged-in" }, tabs: [eraTab(1, HOME, liveManager()), eraTab(2, HOME, liveManager())] });
+    fake.clock.now = Date.now();
+    vm.runInContext("Math.random = function () { return " + seed + "; }", fake.bg);
+    var at = fake.clock.now;
+    await fake.bg.handleMessage({ type: "era-user-activity", at: at }, { tab: { id: 1, url: HOME } });
+    assert.equal(fake.alarms["era-keep-alive"].when, at + (12 + 2 * seed) * MINUTE);
+    fake.clock.now += 5 * MINUTE;
+    var latest = fake.clock.now;
+    await fake.bg.handleMessage({ type: "era-user-activity", at: latest }, { tab: { id: 2, url: HOME } });
+    assert.equal(fake.store.lastUserActivityAt, latest);
+    assert.equal(fake.alarms["era-keep-alive"].when, latest + (12 + 2 * seed) * MINUTE);
+    assert.equal(fake.tabs[0].nudges + fake.tabs[1].nudges, 0);
+    // An older queued event must not pull the deadline back.
+    await fake.bg.handleMessage({ type: "era-user-activity", at: at }, { tab: { id: 1, url: HOME } });
+    assert.equal(fake.store.lastUserActivityAt, latest);
+  }
+});
+
+test("an old alarm cannot nudge before the new activity deadline; the due alarm nudges and repeats", async function () {
+  var fake = makeFake({ storage: { sessionStatus: "logged-in" }, tabs: [eraTab(1, HOME, liveManager())] });
+  fake.clock.now = Date.now();
+  await fake.bg.handleMessage({ type: "era-user-activity", at: fake.clock.now }, { tab: { id: 1, url: HOME } });
+  var deadline = fake.store.nextNudgeAt;
+  fake.clock.now = deadline - 1;
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: fake.clock.now });
+  assert.equal(fake.tabs[0].nudges, 0);
+  await fireKeepAlive(fake);
+  assert.equal(fake.tabs[0].nudges, 1);
+  assert.deepEqual(fake.calls.reloads, [1]);
+  assert.ok(fake.store.nextNudgeAt >= deadline + 12 * MINUTE);
+  assert.ok(fake.store.nextNudgeAt <= deadline + 14 * MINUTE);
+  assert.equal(fake.store.lastUserActivityAt < deadline, true);
+});
+
+test("a probe catches input whose batched report has not arrived, including input during a ping", async function () {
+  for (var duringPing of [false, true]) {
+    var fake = makeFake({ storage: { sessionStatus: "logged-in" }, tabs: [eraTab(1, HOME, liveManager())] });
+    fake.clock.now = Date.now();
+    await fake.bg.configureAlarm();
+    fake.clock.now = fake.store.nextNudgeAt;
+    if (duringPing) {
+      var send = fake.chrome.tabs.sendMessage;
+      fake.chrome.tabs.sendMessage = async function (id, message) {
+        var reply = await send(id, message);
+        if (message.type === "nudge-activity") fake.tabs[0].page.lastUserActivityAt = fake.clock.now;
+        return reply;
+      };
+    } else fake.tabs[0].page.lastUserActivityAt = fake.clock.now;
+    await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: fake.clock.now });
+      assert.deepEqual(fake.calls.reloads, []);
+    assert.equal(fake.tabs[0].nudges, duringPing ? 1 : 0);
+    assert.equal(fake.store.lastUserActivityAt, fake.clock.now);
+    assert.ok(fake.store.nextNudgeAt >= fake.clock.now + 12 * MINUTE);
+  }
+});
+
+test("a lost Chrome alarm is recreated at its saved deadline without adding another 13 minutes", async function () {
+  var at = Date.now();
+  var nextAt = at + 2 * MINUTE;
+  var fake = makeFake({ storage: { sessionStatus: "logged-in", lastUserActivityAt: at - 11 * MINUTE, nextNudgeAt: nextAt }, tabs: [eraTab(1, HOME, liveManager())] });
+  await fake.bg.configureAlarm();
+  assert.equal(fake.alarms["era-keep-alive"].when, nextAt);
+  delete fake.alarms["era-keep-alive"];
+  await fake.bg.configureAlarm();
+  assert.equal(fake.alarms["era-keep-alive"].when, nextAt);
+});
+
+test("server rechecks leave the regular deadline intact", async function () {
+  var fake = serverEndFake();
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  var deadline = fake.store.nextNudgeAt;
+  fake.tabs[0].page.server = "ok";
+  await fireRecheck(fake);
+  assert.equal(fake.store.nextNudgeAt, deadline);
+});
+
+test("activity from login pages, other sites, or an ended session cannot schedule a nudge", async function () {
+  var fake = makeFake({ storage: { sessionStatus: "logged-in" }, tabs: [eraTab(1, HOME, liveManager())] });
+  for (var url of [LOGIN, "https://example.com/", "https://era.nih.gov.example.com/"]) {
+    await fake.bg.handleMessage({ type: "era-user-activity", at: Date.now() }, { tab: { id: 1, url: url } });
+  }
+  assert.equal(fake.store.nextNudgeAt, undefined);
+  fake.store.sessionStatus = "logged-out";
+  await fake.bg.handleMessage({ type: "era-user-activity", at: Date.now() }, { tab: { id: 1, url: HOME } });
+  assert.equal(fake.store.nextNudgeAt, undefined);
+});
+
+
+test("edited tabs keep background renewal but skip reload, and record why", async function () {
+  var fake = makeFake({ storage: { sessionStatus: "logged-in", pingServer: true }, tabs: [eraTab(1, HOME, liveManager({ unsavedEdits: true, keepAliveUrl: ALIVE_URL }))] });
+  await fake.bg.nudgeEraTabs({ name: "era-keep-alive", scheduledTime: Date.now() });
+  assert.equal(fake.tabs[0].pings, 1);
+  assert.deepEqual(fake.calls.reloads, []);
+  assert.ok(logLines(fake).some(function (line) { return line.includes("skipped page refresh /commonsplus/home.era: unsaved edits"); }));
+});
+
+
+test("automatic page loads do not masquerade as user activity or reset the chosen deadline", async function () {
+  var fake = makeFake({ storage: { sessionStatus: "logged-in" }, tabs: [eraTab(1, HOME, liveManager())] });
+  fake.clock.now = Date.now();
+  await fake.bg.handleMessage({ type: "era-user-activity", at: fake.clock.now }, { tab: { id: 1, url: HOME } });
+  var activity = fake.store.lastUserActivityAt;
+  await fireKeepAlive(fake);
+  var deadline = fake.store.nextNudgeAt;
+  fake.clock.now += 100;
+  await fake.bg.handleMessage(pageReady({ at: fake.clock.now, loadedAt: fake.clock.now }), { tab: { id: 1, url: HOME } });
+  assert.equal(fake.store.lastUserActivityAt, activity);
+  assert.equal(fake.store.nextNudgeAt, deadline);
+  assert.deepEqual(fake.store.pendingRefreshes, {});
+  // A subsequent manual navigation counts as activity again.
+  fake.clock.now += 100;
+  await fake.bg.handleMessage(pageReady({ at: fake.clock.now, loadedAt: fake.clock.now }), { tab: { id: 1, url: HOME } });
+  assert.equal(fake.store.lastUserActivityAt, fake.clock.now);
+});
+
+
+test("first injection into an old page starts a full countdown when prior user activity is unknown", async function () {
+  var fake = makeFake({ storage: { sessionStatus: "logged-in" }, tabs: [eraTab(1, HOME, liveManager())] });
+  fake.clock.now = Date.now();
+  await fake.bg.handleMessage(pageReady({ at: fake.clock.now, loadedAt: fake.clock.now - 2 * 60 * MINUTE }), { tab: { id: 1, url: HOME } });
+  assert.equal(fake.store.lastUserActivityAt, fake.clock.now);
+  assert.ok(fake.store.nextNudgeAt >= fake.clock.now + 12 * MINUTE);
 });

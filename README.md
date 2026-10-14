@@ -4,7 +4,11 @@ This small, unofficial Chrome extension helps keep **your own** NIH eRA Commons 
 
 eRA logs you out 45 minutes after your last click, key press, or scroll in an eRA page. Reading and moving the mouse do not count. eRA keeps that deadline in a cookie called `ERA_SESSION_TIMEOUT_COOKIE`, and eRA's own page script pushes it 45 minutes ahead each time it sees activity.
 
-While an eRA tab is open, this extension sends the page a harmless scroll signal every 3 to 5 minutes (the exact gap varies each time, rather than firing on an exact clock), so eRA's own script pushes the deadline ahead. The signal does not move the page or click anything. If eRA shows its session-timeout warning anyway, the extension presses that warning's **Continue** button.
+After your last activity in any eRA tab, the extension waits **13 minutes, with a random variation of up to one minute** (12–14 minutes), renews the session in the background, and refreshes eligible eRA pages. Clicking, typing, scrolling, touching, moving the pointer, or loading an eRA page restarts the countdown. Activity on other websites does not affect it. While you remain away, the extension repeats at a fresh 12–14 minute interval.
+
+Pages with unsaved edits or a form-action URL such as `save.era` are not automatically reloaded; background renewal still runs. For safety, an edited page stays protected until you navigate or reload it yourself, even if an in-page save succeeded. Refreshes and reasons for skipping them appear in the diagnostic log. The popup shows **Last website activity** and **Next idle refresh**. Chrome may deliver timers late if the computer sleeps.
+
+Background renewal sends a harmless scroll signal so eRA's own script pushes its page deadline ahead, and by default calls eRA's keep-alive address. The signal does not move the page. If eRA shows its session-timeout warning anyway, the extension presses that warning's **Continue** button.
 
 When eRA logs you out — its own timer ran out, or you pressed **Logout** — eRA's page deletes that cookie first. The extension watches for exactly that deletion, so it notices the logout the moment it happens, not at the next check-in.
 
@@ -41,7 +45,7 @@ Click the extension's toolbar icon to see its status. If the popup feels cramped
 
 eRA's own page calls a check-in address (`keepSessionAlive.jsp`) on eRA's server every 40 minutes while its timer is live. Keeping eRA's **page timer** alive turned out not to be enough: logs showed eRA's **server** ending sessions it had not heard from in about 60–77 minutes, even while the page timer still had 45 minutes left. With this switch on, a 58-minute stretch without clicking survived.
 
-So since version 1.4.3 the switch is **on by default**. Updating from an older version turns it on once; if you then switch it off, it stays off. With the switch on, on every nudge (every 3 to 5 minutes) the extension calls that check-in address once per eRA application (not once per tab) and records the answer. The call goes only to eRA's own keep-alive address on eRA's own site. It gives up on a call after 15 seconds and logs **server timeout**. With the switch off, the extension still nudges eRA's page but does not call the server.
+So since version 1.4.3 the switch is **on by default**. Updating from an older version turns it on once; if you then switch it off, it stays off. With the switch on, on every nudge (after 12–14 idle minutes) the extension calls that check-in address once per eRA application (not once per tab) and records the answer. The call goes only to eRA's own keep-alive address on eRA's own site. It gives up on a call after 15 seconds and logs **server timeout**. With the switch off, the extension still nudges eRA's page but does not call the server.
 
 If the server answers with a redirect instead, the extension does not follow it to the login page. A redirect means the server refused the check-in. One refusal could be a blip, so the extension logs **server refused keep-alive — rechecking in 30 s**, turns the badge orange, shows *Refused at …* in the popup's **Last server check-in** line, and asks the server once more 30 seconds later. If the server accepts, everything goes back to normal. If it refuses a second time in a row, or an eRA tab lands on eRA's login page while the recheck is pending, the session has ended — see the next section. If no eRA tab can be pinged when the recheck is due, it tries again every 30 seconds, up to three times, and then leaves the question to the next regular check.
 
@@ -51,7 +55,7 @@ This Chrome notification means eRA's **server** has ended your session, even tho
 
 The notification says roughly when the server stopped accepting the session and how long after you signed in that was. Clicking it opens the extension's log in a tab. From that moment the extension stops nudging, stops pressing eRA's **Continue** button (so eRA's own logout can show), and ignores activity on the old tab. Switching the extension off and on again does not change that. It counts you as signed in again only once eRA serves a new page after you log back in.
 
-In one real log, eRA accepted every check-in for about two hours and then refused every one from about **2 hours 10 minutes after sign-in**. That suggests eRA has a **fixed maximum session length** that no amount of activity can extend. This is **not confirmed** — it is one observation. The extension cannot get past such a limit. To help pin it down, the popup lists how long each session lasted, and once two server-ended sessions lasted within 15 minutes of each other it shows a line such as *eRA seems to end sessions about 2 h 10 min after sign-in*.
+The stored September–October logs show that successful keep-alive responses do **not** guarantee a usable session: eRA returned HTTP 204 just minutes before ordinary page requests redirected to login. Recorded server-related endings ranged from about 32 to 96 minutes after the extension noticed sign-in; these observations do not establish one fixed maximum session length. Version 1.7.0 adds actual idle page refreshes as an experiment. Their effectiveness needs a fresh signed-in session test. See [the log investigation](docs/session-investigation.md) for the evidence.
 
 ## Recent logouts
 
@@ -61,7 +65,7 @@ When the most recent logout was eRA's server ending the session, the status line
 
 Under some entries the popup adds one line saying what ended the session:
 
-- *"eRA's server stopped accepting the session even though the extension kept checking in. eRA appears to have a fixed session limit that the extension cannot get past."* The server refused two check-ins in a row (the reason reads *eRA's server ended the session (keep-alive refused)*).
+- *"eRA's server stopped accepting the session even though the extension kept checking in. A successful background check-in does not guarantee the session will stay usable."* The server refused two check-ins in a row (the reason reads *eRA's server ended the session (keep-alive refused)*).
 - *"eRA's server ended this session even though its page timer was still running. Keep "Also ping eRA's server" on."* eRA sent the tab to its login page while the page's own timer still had time left (the reason reads *eRA sent you to its login page while its page timer still had N min left — eRA's server ended the session*).
 - *"eRA deleted its own timeout cookie — eRA's page timer or the Logout button ended the session."* eRA's page deletes the cookie only when its own timer runs out or you press **Logout**.
 - *"eRA's own timer ran out before the next activity nudge."* The cookie's deadline had passed.
@@ -119,7 +123,7 @@ The popup has one more switch, under the diagnostic log: **Record everything (di
 
 ## Important limits
 
-This extension cannot log you in, and it cannot beat any maximum session length that eRA's server enforces (there appears to be one; see above). What it can do is tell you the moment the server ends the session. Its warning-button detection is deliberately cautious; it has not yet been checked against the live eRA dialog. It will never knowingly press buttons labelled log out, sign out, end session, or cancel.
+This extension cannot log you in, and it cannot beat any maximum session length that eRA's server enforces (the logs do not establish whether one applies). What it can do is tell you the moment the server ends the session. Its warning-button detection is deliberately cautious; it has not yet been checked against the live eRA dialog. It will never knowingly press buttons labelled log out, sign out, end session, or cancel.
 
 The extension asks only for storage, alarms, notifications, scripting (to add itself to eRA tabs that were open before it was installed or updated), cookies, and access to `https://*.era.nih.gov/*`. It does **not** ask for Chrome's broad `tabs` permission. The diagnostic recorder's extra permissions (`webRequest`, and access to `nih.gov` and `login.gov`) are optional: they are asked for only when you turn the recorder on (see above).
 

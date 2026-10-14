@@ -29,11 +29,10 @@ clicking.
 
 What it does, while enabled and an eRA Commons tab is open:
 
-- Roughly every 3 to 5 minutes (the exact gap varies each time rather than
-  firing on a fixed schedule), it sends eRA's own page a harmless scroll
-  signal — the same kind of "you're still here" signal a real scroll or
-  click would send. This does not move your page, change anything on
-  screen, or click anything you didn't ask it to.
+- After your last activity on eRA, it waits 13 minutes with up to one
+  minute of random variation (12–14 minutes), renews the background session,
+  and refreshes eligible pages. Activity in any eRA tab restarts the timer.
+  It skips pages with unsaved edits or form-action URLs, and records why.
 - If eRA's own timeout warning pops up anyway, it presses that warning's
   own "Continue" button for you.
 - By default it also calls eRA's own keep-alive web address directly —
@@ -42,8 +41,7 @@ What it does, while enabled and an eRA Commons tab is open:
   hour even while eRA's page timer is still running. You can switch this
   off in the popup ("Also ping eRA's server"); the page nudges carry on
   either way.
-- If eRA's server ends your session anyway (it appears to have a fixed
-  session limit), it shows a notification right away — "eRA ended your
+- If eRA's server ends your session anyway, it shows a notification right away — "eRA ended your
   session — log in again" — instead of letting the old tab look alive.
 - It keeps a small log on your own computer — times, page names, and
   whether eRA's timer was extended — so you can see what it has been
@@ -120,10 +118,9 @@ logouts, and the local diagnostic log — all read and written with
 (`popup.js`) to show status. Nothing here is synced to a Google account or
 sent anywhere; it is `local`, not `sync`, storage.
 
-**alarms** — Used to run the every-4-minute activity nudge on a schedule
-that keeps working even when the popup is closed. `background.js` creates
-one alarm (`chrome.alarms.create` with a 4-minute period) and reacts to it
-with `chrome.alarms.onAlarm`.
+**alarms** — Used for the 12–14 minute inactivity deadline, even when the
+popup is closed. `background.js` creates a one-shot alarm with an absolute
+deadline, resets it on eRA user activity, and reacts to `chrome.alarms.onAlarm`.
 
 **notifications** — Used for exactly one thing: telling you, with a native
 Chrome notification, that a session the extension had seen as signed in has

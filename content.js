@@ -7,6 +7,11 @@
   var CLICK_COOLDOWN_MS = 30 * 1000;
   var OBSERVER_THROTTLE_MS = 500;
   var PING_TIMEOUT_MS = 15 * 1000;
+  var ACTIVITY_REPORT_MS = 1000;
+  var ACTIVITY_EVENTS = ["pointerdown", "pointermove", "keydown", "input", "change", "click", "wheel", "scroll", "touchstart"];
+  var lastUserActivityAt = null;
+  var activityTimer = null;
+  var unsavedEdits = false;
 
   function contextAlive() {
     try {
@@ -47,6 +52,8 @@
     if (observer) observer.disconnect();
     window.clearInterval(pollTimer);
     window.clearTimeout(observerTimer);
+    window.clearTimeout(activityTimer);
+    activityListeners(false);
     document.removeEventListener(STOP_EVENT, stop);
     document.removeEventListener("visibilitychange", onVisibilityChange);
     windowListeners(false);
@@ -84,6 +91,46 @@
       path: location.pathname,
       visibility: document.visibilityState
     }, extra || {}));
+  }
+
+  // Only browser-generated input counts. In particular, our synthetic scroll
+  // and Continue clicks must never move the user's inactivity deadline.
+  function onUserActivity(event) {
+    if (stopped || !enabled || loggedOut || event.isTrusted !== true ||
+        matcher.isIgnoredEraUrl(location.href) || matcher.isLoginUrl(location.href) || !managerControl()) return;
+    if (event.type === "input" || event.type === "change") unsavedEdits = true;
+    lastUserActivityAt = Date.now();
+    if (activityTimer !== null) return;
+    activityTimer = window.setTimeout(function () {
+      activityTimer = null;
+      if (stopped || !enabled || loggedOut) return;
+      report({ type: "era-user-activity", at: lastUserActivityAt });
+    }, ACTIVITY_REPORT_MS);
+  }
+
+  function activityListeners(add) {
+    ACTIVITY_EVENTS.forEach(function (type) {
+      document[add ? "addEventListener" : "removeEventListener"](type, onUserActivity, true);
+    });
+  }
+
+  function hasUnsavedEdits() {
+    if (unsavedEdits) return true;
+    // Also protect edits made before the extension was injected into an open
+    // tab. Compare locally; no form values are recorded or sent anywhere.
+    return Array.prototype.some.call(document.querySelectorAll("input, textarea, select"), function (field) {
+      var type = String(field.type || "").toLowerCase();
+      if (["hidden", "submit", "button", "reset", "image"].indexOf(type) !== -1) return false;
+      if (type === "checkbox" || type === "radio") return field.checked !== field.defaultChecked;
+      if (type === "file") return !!(field.files && field.files.length);
+      if (field.options) {
+        var defaults = Array.prototype.some.call(field.options, function (option) { return option.defaultSelected; });
+        return Array.prototype.some.call(field.options, function (option, index) {
+          return option.selected !== (option.defaultSelected || (!defaults && !field.multiple && index === 0));
+        });
+      }
+      return field.value !== field.defaultValue;
+    });
   }
 
   function onVisibilityChange() {
@@ -218,7 +265,9 @@
       managerPresent: !!control,
       logoutAt: logoutAt,
       minsLeft: minutesLeft(logoutAt, now),
-      keepAliveUrl: keepAliveUrl(control)
+      keepAliveUrl: keepAliveUrl(control),
+      lastUserActivityAt: lastUserActivityAt,
+      unsavedEdits: unsavedEdits
     };
   }
 
@@ -339,6 +388,20 @@
       sendResponse(state);
       return false;
     }
+    if (message.type === "refresh-page") {
+      var state = pageState();
+      var reason = null;
+      if (!enabled || loggedOut || !state.managerPresent || !(state.logoutAt > Date.now()) ||
+          matcher.isLoginUrl(location.href) || matcher.isIgnoredEraUrl(location.href)) reason = "inactive page";
+      else if (hasUnsavedEdits()) reason = "unsaved edits";
+      // Avoid replaying an action or prompting to resubmit a saved form.
+      else if (/\/(?:save|submit|upload|delete|remove|update|generate)[^/]*\.era$/i.test(location.pathname)) reason = "form action page";
+      else if (typeof message.activityCutoff !== "number" ||
+          (lastUserActivityAt !== null && lastUserActivityAt > message.activityCutoff)) reason = "recent activity";
+      sendResponse({ refreshed: !reason, reason: reason });
+      if (!reason) location.reload();
+      return false;
+    }
     if (message.type === "nudge-activity") return nudge(message, sendResponse);
     return false;
   }
@@ -361,6 +424,7 @@
   document.addEventListener(STOP_EVENT, stop);
   document.addEventListener("visibilitychange", onVisibilityChange);
   windowListeners(true);
+  activityListeners(true);
 
   chrome.runtime.onMessage.addListener(onMessage);
   chrome.storage.onChanged.addListener(onStorageChanged);

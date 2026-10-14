@@ -63,8 +63,9 @@
     <h2>What this extension does</h2>
     <p>
       While it is turned on and an eRA Commons browser tab is open, it sends
-      that page a harmless scroll signal every four minutes so eRA's own page
-      script treats you as active, and it presses eRA's own on-screen
+      that page a harmless scroll signal and refreshes eligible pages after
+      12–14 minutes without user activity on eRA. Pages with unsaved edits
+      or form-action URLs are skipped. It also presses eRA's own on-screen
       "Continue" button if a timeout warning appears. By default it also
       calls eRA's own keep-alive address on eRA's own site (see "The one
       network call" below). That is the whole job.
@@ -77,8 +78,10 @@
       run by the maintainer.</p>
     <ul>
       <li><strong>Session status and timestamps</strong> — whether you appear
-        signed in, and the last few times the extension nudged the page or
-        clicked a warning.</li>
+        signed in, the latest website activity time and next idle refresh time,
+        and the last few times it nudged, refreshed, or clicked a warning.
+        Form values are compared locally only to avoid reloading unsaved edits;
+        those values are never recorded or transmitted.</li>
       <li><strong>eRA's own timeout cookie</strong> (<code>ERA_SESSION_TIMEOUT_COOKIE</code>)
         — read only to know when eRA itself will end your session, and
         watched only to notice the moment eRA deletes it (which is how eRA

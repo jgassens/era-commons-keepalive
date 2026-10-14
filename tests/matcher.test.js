@@ -446,14 +446,14 @@ test("popupStatus gives the pill's tone and sentence for each state", function (
   // A server-end pattern sentence rides along as a subtext line, only for
   // the green "signed in" status.
   assert.deepEqual(
-    matcher.popupStatus({ enabled: true, sessionStatus: "logged-in", lastNudgeAt: lastNudgeAt }, null, "eRA seems to end sessions about 2 h after sign-in (seen 2 times)."),
+    matcher.popupStatus({ enabled: true, sessionStatus: "logged-in", lastNudgeAt: lastNudgeAt }, null, "Some recorded sessions ended about 2 h after sign-in (seen 2 times)."),
     {
       tone: "ok",
       text: "Keeping you signed in — last check-in " + matcher.clockTime(lastNudgeAt),
-      subtext: "eRA seems to end sessions about 2 h after sign-in (seen 2 times)."
+      subtext: "Some recorded sessions ended about 2 h after sign-in (seen 2 times)."
     }
   );
-  assert.deepEqual(matcher.popupStatus({ enabled: true, sessionStatus: "logged-out" }, null, "eRA seems to end sessions about 2 h after sign-in (seen 2 times)."),
+  assert.deepEqual(matcher.popupStatus({ enabled: true, sessionStatus: "logged-out" }, null, "Some recorded sessions ended about 2 h after sign-in (seen 2 times)."),
     { tone: "bad", text: "Signed out — log in to eRA again." });
   assert.deepEqual(matcher.popupStatus({ enabled: true, sessionStatus: "unknown" }, null),
     { tone: "neutral", text: "Status unknown" });
@@ -503,7 +503,7 @@ test("formats server timeouts, server warnings and the no-tabs cookie state", fu
   assert.equal(logAt({ type: "no-tabs", from: "logged-in", to: "logged-in", cookie: null }), "10:04 no eRA tabs open, cookie unreadable; still logged in, nothing to nudge (check-in timer stopped)");
 });
 
-test("formats session lengths and names eRA's apparent session limit", function () {
+test("formats session lengths and describes observed session lengths", function () {
   assert.equal(matcher.formatDuration(130.4), "2 h 10 min");
   assert.equal(matcher.formatDuration(45), "45 min");
   assert.equal(matcher.formatDuration(120), "2 h");
@@ -522,19 +522,19 @@ test("formats session lengths and names eRA's apparent session limit", function 
   // Two more than 15 minutes apart are not one either.
   assert.equal(matcher.sessionEndPattern([server(100), server(130)]), null);
   assert.equal(matcher.sessionEndPattern([server(128), server(132)]),
-    "eRA seems to end sessions about 2 h 10 min after sign-in (seen 2 times).");
+    "Some recorded sessions ended about 2 h 10 min after sign-in (seen 2 times).");
   // Records that hold only minutesSinceSignIn work too; the biggest group wins.
   assert.equal(matcher.sessionEndPattern([
     { reason: matcher.SERVER_END_REASON, minutesSinceSignIn: 60 },
     server(129), server(131), server(130),
     { reason: matcher.SERVER_END_REASON, minutesSinceSignIn: 62 }
-  ]), "eRA seems to end sessions about 2 h 10 min after sign-in (seen 3 times).");
+  ]), "Some recorded sessions ended about 2 h 10 min after sign-in (seen 3 times).");
   assert.equal(matcher.sessionEndPattern("junk"), null);
 
   var record = server(130);
   assert.equal(matcher.serverEndStatus(record), "eRA's server ended your session at " +
     matcher.clockTime(record.estimatedEndAt) + ", 2 h 10 min after sign-in.");
-  assert.match(matcher.logoutNote(record), /fixed session limit/);
+  assert.match(matcher.logoutNote(record), /successful background check-in/);
   assert.equal(matcher.serverEndNotification(record.estimatedEndAt, null).message,
     "eRA's server stopped accepting your session around " + matcher.clockTime(record.estimatedEndAt) + ".");
   assert.match(matcher.formatLogLine({ type: "server-refused", at: start, path: "/commonsplus/home.era" }),

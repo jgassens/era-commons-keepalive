@@ -93,8 +93,8 @@
   // The keep-alive alarm's next delay is picked at random from this range
   // (minutes) rather than a fixed period, so it does not repeat with
   // machine-regularity.
-  var NUDGE_MIN_MINUTES = 3;
-  var NUDGE_MAX_MINUTES = 5;
+  var NUDGE_MIN_MINUTES = 12;
+  var NUDGE_MAX_MINUTES = 14;
 
   // A random delay in [NUDGE_MIN_MINUTES, NUDGE_MAX_MINUTES] minutes for the
   // next keep-alive alarm. random is injectable for tests; defaults to Math.random.
@@ -445,7 +445,7 @@
     }
     if (best.length < 2) return null;
     var average = best.reduce(function (sum, value) { return sum + value; }, 0) / best.length;
-    return "eRA seems to end sessions about " + formatDuration(average) + " after sign-in (seen " +
+    return "Some recorded sessions ended about " + formatDuration(average) + " after sign-in (seen " +
       best.length + " times).";
   }
 
@@ -455,7 +455,7 @@
     var reason = String(record.reason || "");
     if (isServerEndRecord(record)) {
       return "eRA's server stopped accepting the session even though the extension kept checking in. " +
-        "eRA appears to have a fixed session limit that the extension cannot get past.";
+        "A successful background check-in does not guarantee the session will stay usable.";
     }
     if (/server ended the session/i.test(reason)) {
       return "eRA's server ended this session even though its page timer was still running. Keep \"Also ping eRA's server\" on.";
@@ -652,6 +652,8 @@
     if (entry.type === "alarm-late") {
       return prefix + "alarm late by " + oneDecimal(entry.minutesLate) + " min (computer asleep?)";
     }
+    if (entry.type === "page-refresh") return prefix + "refreshed page " + path;
+    if (entry.type === "page-refresh-skipped") return prefix + "skipped page refresh " + path + ": " + String(entry.reason || "page unavailable");
     if (entry.type === "auto-click") return prefix + "continued timeout warning " + path;
     return prefix + String(entry.type || "event") + " " + path;
   }
