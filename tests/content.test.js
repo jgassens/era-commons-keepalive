@@ -52,6 +52,7 @@ function makePage(options) {
   var epoch = Date.now();
   class TestDate extends Date { static now() { return epoch + clock.now; } }
   var docListeners = {};
+  var fields = options.fields || [];
   var calls = { sent: [], fetches: [], scrolls: 0, reloads: 0 };
   var cookie = { logoutAt: options.logoutAt };
 
@@ -72,9 +73,9 @@ function makePage(options) {
       return "JSESSIONID=abc; " + (cookie.logoutAt === null ? "" : "ERA_SESSION_TIMEOUT_COOKIE=" + cookie.logoutAt);
     },
     documentElement: {},
-    getElementById: function (id) { return byId[id] || null; },
+    getElementById: function (id) { return byId[id] || fields.find(function (field) { return field.id === id; }) || null; },
     querySelector: function (selector) { return selector.charAt(0) === "#" ? byId[selector.slice(1)] || null : null; },
-    querySelectorAll: function () { return []; },
+    querySelectorAll: function (selector) { return selector === "input, textarea, select" ? fields : []; },
     addEventListener: function (type, fn) { (docListeners[type] = docListeners[type] || []).push(fn); },
     removeEventListener: function (type, fn) {
       var list = docListeners[type] || [];
@@ -116,7 +117,11 @@ function makePage(options) {
     chrome: chrome,
     Date: TestDate,
     document: document,
-    location: { href: "https://public.era.nih.gov/commonsplus/home.era", pathname: "/commonsplus/home.era", reload: function () { calls.reloads += 1; } },
+    location: {
+      href: options.url || "https://public.era.nih.gov/commonsplus/home.era",
+      pathname: new URL(options.url || "https://public.era.nih.gov/commonsplus/home.era").pathname,
+      reload: function () { calls.reloads += 1; }
+    },
     URL: URL,
     Event: Event,
     CustomEvent: CustomEvent,
@@ -174,7 +179,7 @@ function makePage(options) {
   }
 
   return {
-    context: context, chrome: chrome, calls: calls, cookie: cookie, modal: modal,
+    context: context, chrome: chrome, calls: calls, cookie: cookie, modal: modal, fields: fields,
     continueButton: continueButton, load: load, advance: advance, send: send
   };
 }
@@ -509,4 +514,117 @@ test("edits made before injection also prevent a refresh", async function () {
   var reply = await page.send({ type: "refresh-page", activityCutoff: page.context.Date.now() });
   assert.equal(reply.reason, "unsaved edits");
   assert.equal(page.calls.reloads, 0);
+});
+
+function scoreField(value) {
+  var field = element("allAppls_finalScore_demo", { attributes: { "data-initialvalue": value } });
+  field.tagName = "INPUT";
+  field.type = "text";
+  field.value = value;
+  field.defaultValue = value;
+  return field;
+}
+
+function scorePage(fields) {
+  return makePage({ fields: fields, url: "https://public.era.nih.gov/iar/finalscores/view.era" });
+}
+
+function editField(page, field, value) {
+  field.value = value;
+  page.context.document.dispatchEvent({ type: "input", target: field, isTrusted: true });
+}
+
+function attemptRefresh(page) {
+  return page.send({ type: "refresh-page", activityCutoff: page.context.Date.now() });
+}
+
+test("IAR edit then successful Save/table redraw permits a refresh without reloading first", async function () {
+  var original = scoreField("initial demo value");
+  var page = scorePage([original]);
+  page.load();
+  await flush();
+  editField(page, original, "saved demo value");
+  assert.equal((await page.send({ type: "probe" })).unsavedEdits, true);
+  assert.equal((await attemptRefresh(page)).reason, "unsaved edits");
+  // IAR's successful Save reloads its table from the server, replacing the
+  // edited input with one whose initial value contains the saved score.
+  page.fields.splice(0, 1, scoreField("saved demo value"));
+  assert.equal((await page.send({ type: "probe" })).unsavedEdits, false);
+  assert.equal((await attemptRefresh(page)).refreshed, true);
+  assert.equal(page.calls.reloads, 1);
+  assert.ok(!JSON.stringify(page.calls.sent).includes("demo value"));
+});
+
+test("clicking Save alone, a failed save, or a conflicting server redraw do not clear edits", async function () {
+  var original = scoreField("initial");
+  var page = scorePage([original]);
+  page.load();
+  await flush();
+  editField(page, original, "unsaved");
+  page.context.document.dispatchEvent({ type: "click", target: element("saveAllFinalScores"), isTrusted: true });
+  assert.equal((await attemptRefresh(page)).reason, "unsaved edits");
+  // A conflict reloads the server's old value, not the edited value.
+  page.fields.splice(0, 1, scoreField("initial"));
+  assert.equal((await attemptRefresh(page)).reason, "unsaved edits");
+  assert.equal(page.calls.reloads, 0);
+});
+
+test("new edits after Save are protected, including an edit before the saved redraw is probed", async function () {
+  var original = scoreField("initial");
+  var page = scorePage([original]);
+  page.load();
+  await flush();
+  editField(page, original, "saved");
+  var saved = scoreField("saved");
+  page.fields.splice(0, 1, saved);
+  editField(page, saved, "new unsaved edit");
+  assert.equal((await attemptRefresh(page)).reason, "unsaved edits");
+  assert.equal(page.calls.reloads, 0);
+});
+
+test("table filtering cannot hide unsaved score edits from the refresh guard", async function () {
+  var original = scoreField("initial");
+  var page = scorePage([original]);
+  page.load();
+  await flush();
+  editField(page, original, "unsaved");
+  page.fields.splice(0, 1); // DataTables detaches rows that do not match search.
+  assert.equal((await attemptRefresh(page)).reason, "unsaved edits");
+  page.fields.push(original);
+  assert.equal((await attemptRefresh(page)).reason, "unsaved edits");
+});
+
+test("reverting an edit to the saved value restores refresh eligibility", async function () {
+  var field = scoreField("initial");
+  var page = scorePage([field]);
+  page.load();
+  await flush();
+  editField(page, field, "temporary");
+  editField(page, field, "initial");
+  assert.equal((await attemptRefresh(page)).refreshed, true);
+});
+
+test("search and table-length controls do not count as unsaved page contents", async function () {
+  var search = { id: "table-search", tagName: "INPUT", type: "search", value: "", defaultValue: "" };
+  var length = { id: "table-length", tagName: "SELECT", type: "select-one", closest: function () { return {}; } };
+  var page = scorePage([search, length]);
+  page.load();
+  await flush();
+  editField(page, search, "filter");
+  page.context.document.dispatchEvent({ type: "change", target: length, isTrusted: true });
+  assert.equal((await attemptRefresh(page)).refreshed, true);
+});
+
+test("an IAR saved-value marker is authoritative only on the IAR scores page", async function () {
+  var field = scoreField("initial");
+  var page = scorePage([field]);
+  page.load();
+  await flush();
+  editField(page, field, "saved");
+  field.attributes["data-initialvalue"] = "saved";
+  assert.equal((await attemptRefresh(page)).refreshed, true);
+  var other = makePage({ fields: [field] });
+  other.load();
+  await flush();
+  assert.equal((await attemptRefresh(other)).reason, "unsaved edits");
 });

@@ -11,7 +11,8 @@
   var ACTIVITY_EVENTS = ["pointerdown", "pointermove", "keydown", "input", "change", "click", "wheel", "scroll", "touchstart"];
   var lastUserActivityAt = null;
   var activityTimer = null;
-  var unsavedEdits = false;
+  var editedFields = new Set();
+  var untrackedEdits = false;
 
   function contextAlive() {
     try {
@@ -98,7 +99,16 @@
   function onUserActivity(event) {
     if (stopped || !enabled || loggedOut || event.isTrusted !== true ||
         matcher.isIgnoredEraUrl(location.href) || matcher.isLoginUrl(location.href) || !managerControl()) return;
-    if (event.type === "input" || event.type === "change") unsavedEdits = true;
+    if (event.type === "input" || event.type === "change") {
+      var field = event.target;
+      if (field && /^(INPUT|TEXTAREA|SELECT)$/.test(field.tagName || "")) {
+        if (!isTransientControl(field)) editedFields.add(field);
+      } else {
+        // Custom editors have no native saved-value baseline. Keep protecting
+        // them until a page load rather than guessing whether Save succeeded.
+        untrackedEdits = true;
+      }
+    }
     lastUserActivityAt = Date.now();
     if (activityTimer !== null) return;
     activityTimer = window.setTimeout(function () {
@@ -114,23 +124,64 @@
     });
   }
 
+  function isTransientControl(field) {
+    var type = String(field.type || "").toLowerCase();
+    return ["hidden", "submit", "button", "reset", "image", "search"].indexOf(type) !== -1 ||
+      !!(field.closest && field.closest(".dt-search, .dt-length, .dataTables_filter, .dataTables_length"));
+  }
+
+  function isIarScoreField(field) {
+    return location.pathname === "/iar/finalscores/view.era" &&
+      /^allAppls_(?:criteria_score|finalScore)_/.test(field.id || "");
+  }
+
+  function savedFieldValue(field) {
+    // IAR renders data-initialValue from server data and rebuilds its table
+    // after Save. It is not the current input value or a Save-button click.
+    if (isIarScoreField(field) && typeof field.getAttribute === "function") {
+      var initial = field.getAttribute("data-initialvalue");
+      if (initial !== null) return initial;
+    }
+    return field.defaultValue;
+  }
+
+  function fieldHasUnsavedEdits(field) {
+    if (isTransientControl(field)) return false;
+    var type = String(field.type || "").toLowerCase();
+    if (type === "checkbox" || type === "radio") return field.checked !== field.defaultChecked;
+    if (type === "file") return !!(field.files && field.files.length);
+    if (field.options) {
+      var defaults = Array.prototype.some.call(field.options, function (option) { return option.defaultSelected; });
+      return Array.prototype.some.call(field.options, function (option, index) {
+        return option.selected !== (option.defaultSelected || (!defaults && !field.multiple && index === 0));
+      });
+    }
+    return field.value !== savedFieldValue(field);
+  }
+
   function hasUnsavedEdits() {
-    if (unsavedEdits) return true;
-    // Also protect edits made before the extension was injected into an open
-    // tab. Compare locally; no form values are recorded or sent anywhere.
-    return Array.prototype.some.call(document.querySelectorAll("input, textarea, select"), function (field) {
-      var type = String(field.type || "").toLowerCase();
-      if (["hidden", "submit", "button", "reset", "image"].indexOf(type) !== -1) return false;
-      if (type === "checkbox" || type === "radio") return field.checked !== field.defaultChecked;
-      if (type === "file") return !!(field.files && field.files.length);
-      if (field.options) {
-        var defaults = Array.prototype.some.call(field.options, function (option) { return option.defaultSelected; });
-        return Array.prototype.some.call(field.options, function (option, index) {
-          return option.selected !== (option.defaultSelected || (!defaults && !field.multiple && index === 0));
-        });
+    if (untrackedEdits) return true;
+    var dirty = false;
+    editedFields.forEach(function (field) {
+      if (!fieldHasUnsavedEdits(field)) {
+        editedFields.delete(field);
+        return;
       }
-      return field.value !== field.defaultValue;
+      // Filtering a table can detach edited rows; that must not make their
+      // edits look saved. Retire an old IAR field only when the replacement
+      // carries its edited value back as a server-supplied saved baseline.
+      var replacement = field.id && document.getElementById(field.id);
+      if (isIarScoreField(field) && replacement && replacement !== field &&
+          isIarScoreField(replacement) && savedFieldValue(replacement) === field.value) {
+        editedFields.delete(field);
+        if (fieldHasUnsavedEdits(replacement)) dirty = true;
+      } else {
+        dirty = true;
+      }
     });
+    // This also protects edits made before injection. Comparisons stay in
+    // this page's memory; values are never recorded or sent to the extension.
+    return dirty || Array.prototype.some.call(document.querySelectorAll("input, textarea, select"), fieldHasUnsavedEdits);
   }
 
   function onVisibilityChange() {
@@ -267,7 +318,7 @@
       minsLeft: minutesLeft(logoutAt, now),
       keepAliveUrl: keepAliveUrl(control),
       lastUserActivityAt: lastUserActivityAt,
-      unsavedEdits: unsavedEdits
+      unsavedEdits: hasUnsavedEdits()
     };
   }
 
